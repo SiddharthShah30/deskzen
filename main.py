@@ -395,24 +395,88 @@ class AudioEngine:
         self.repeat     = False
         self._lock      = threading.Lock()
         self._wall      = time.time()
-        self._play_gen  = 0          # generation counter — kill stale threads
-        self._proc      = None       # subprocess for file playback
+        self._play_gen  = 0
+        self._proc      = None
         self.status_msg = ""
-        self._backend   = self._detect()
-        # spectrum smoothing state (per track type)
         self._spec_t    = 0.0
+        self._backend   = self._detect()
+        # Try to install sounddevice in background if not found
+        if self._backend != "sounddevice":
+            threading.Thread(target=self._try_install_sd, daemon=True).start()
+
+    def _try_install_sd(self):
+        """Silent one-time install of sounddevice if missing."""
+        try:
+            import sounddevice  # noqa
+            self._backend = "sounddevice"
+            return
+        except ImportError:
+            pass
+        try:
+            self.status_msg = "Installing audio engine (one-time)..."
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "sounddevice", "-q"],
+                timeout=90, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import sounddevice  # noqa
+            self._backend   = "sounddevice"
+            self.status_msg = ""
+        except Exception:
+            self.status_msg = ""
 
     def _detect(self):
-        for cmd in ("ffplay","afplay","mpv","mplayer"):
-            if shutil.which(cmd): return cmd
+        """
+        Priority order:
+          1. sounddevice  — pure Python, bundles PortAudio on Windows, gapless
+          2. ffplay        — subprocess pipe, works everywhere ffmpeg is installed
+          3. afplay        — macOS only, file-based fallback
+          4. aplay         — Linux ALSA fallback
+          5. winsound      — last resort Windows, WAV only
+        """
+        # Try sounddevice (auto-installs once if missing)
+        try:
+            import sounddevice  # noqa
+            return "sounddevice"
+        except Exception:
+            pass
+        # Try subprocess players
+        for cmd in ("ffplay", "afplay", "mpv", "mplayer", "aplay"):
+            if shutil.which(cmd):
+                return cmd
+        # Windows: search common ffmpeg locations
         if platform.system() == "Windows":
-            try: import winsound; return "winsound"
-            except ImportError: pass
-            if shutil.which("powershell"): return "powershell"
-        if shutil.which("aplay"): return "aplay"
+            for p in [
+                os.path.join(os.environ.get("LOCALAPPDATA",""),  "ffmpeg","bin","ffplay.exe"),
+                os.path.join(os.environ.get("USERPROFILE",""),   "ffmpeg","bin","ffplay.exe"),
+                "C:/ffmpeg/bin/ffplay.exe",
+                "C:/Program Files/ffmpeg/bin/ffplay.exe",
+            ]:
+                if os.path.isfile(p):
+                    return p
+            try:
+                import winsound  # noqa
+                return "winsound"
+            except ImportError:
+                pass
         return None
 
-    # ── spectrum (noise-reactive per genre) ──────────────────────────────
+    @staticmethod
+    def _ensure_sounddevice():
+        """Install sounddevice if not present. Returns True on success."""
+        try:
+            import sounddevice  # noqa
+            return True
+        except Exception:
+            pass
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "sounddevice", "-q"],
+                timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import sounddevice  # noqa
+            return True
+        except Exception:
+            return False
+
+    # ── spectrum (beat/noise reactive) ───────────────────────────────────
     def get_spectrum(self, n=32):
         if not self.playing:
             return [0.0]*n
@@ -421,69 +485,67 @@ class AudioEngine:
         t     = self.elapsed
         out   = []
         for b in range(n):
-            frac = b / max(1, n-1)   # 0=bass, 1=treble
+            frac = b / max(1, n-1)
             if genre == "brown":
-                # heavy bass, rolls off steeply
                 v = math.exp(-frac * 5.0) * (0.7 + 0.3*math.sin(t*1.3+b*0.5))
             elif genre == "pink":
-                # 1/f: slopes gently
                 v = (1.0-frac*0.7) * (0.5 + 0.4*math.sin(t*0.9+b*0.3))
             elif genre == "white":
-                # flat
                 v = 0.5 + 0.4*math.sin(t*2.1*frac+b)
             elif genre == "rain":
-                # mid-heavy with occasional high spikes (droplets)
                 base = math.exp(-((frac-0.35)**2)/0.08)
                 drop = 0.6*math.exp(-((frac-0.8)**2)/0.02)*abs(math.sin(t*7.3))
                 v = base*0.6 + drop
             elif genre == "space":
-                # concentrated in bass/sub with slow movement
                 v = math.exp(-frac*8)*(0.8+0.2*math.sin(t*0.3+frac*3))
                 v += 0.15*math.exp(-((frac-0.1)**2)/0.01)*abs(math.sin(t*0.7))
             else:
-                # user track: generic reactive
-                bpm  = trk.get("bpm",90)
-                beat = 60.0/bpm
-                kick = math.exp(-(t%beat)/beat*8)*0.8
+                bpm  = trk.get("bpm", 90)
+                beat = 60.0 / bpm
+                kick = math.exp(-(t % beat)/beat*8)*0.8
                 v = (0.4+0.4*kick)*math.exp(-frac*3)
                 v += 0.2*abs(math.sin(t*frac*2+b*0.5))
-            noise = random.uniform(-0.05, 0.05)
-            out.append(min(1.0, max(0.0, v + noise)))
+            v += random.uniform(-0.04, 0.04)
+            out.append(min(1.0, max(0.0, v)))
         return out
 
-    # ── playback ──────────────────────────────────────────────────────────
+    # ── playback ─────────────────────────────────────────────────────────
     def _new_gen(self):
-        """Increment generation; old threads check this and exit."""
         with self._lock:
             self._play_gen += 1
             return self._play_gen
 
     def _spawn(self):
-        """Start a new playback thread for current track."""
         with self._lock:
-            gen = self._play_gen
-            idx = self.track_idx
+            gen   = self._play_gen
+            idx   = self.track_idx
             start = self.elapsed
-        threading.Thread(
-            target=self._play_thread,
-            args=(gen, idx, start),
-            daemon=True
-        ).start()
+        threading.Thread(target=self._play_thread,
+                         args=(gen, idx, start), daemon=True).start()
 
     def _alive(self, gen):
-        """Return True if this generation is still current."""
         with self._lock:
             return gen == self._play_gen
 
     def _play_thread(self, gen, idx, start_sec):
         trk = self.library[idx] if idx < len(self.library) else BUILTIN_TRACKS[0]
         if trk.get("source") == "builtin":
-            self._stream_builtin(gen, trk, start_sec)
+            self._play_builtin(gen, trk, start_sec)
         else:
-            self._play_file(gen, trk["source"], start_sec, trk.get("duration",0))
-
-        # natural end (not killed) → advance
-        if self._alive(gen):
+            self._play_file(gen, trk["source"], start_sec, trk.get("duration", 0))
+        # natural end → advance (only for finite tracks)
+        if not self._alive(gen):
+            return
+        with self._lock:
+            trk2 = self.library[self.track_idx] if self.track_idx < len(self.library) else {}
+            is_inf = (trk2.get("duration") or 0) == 0
+        if is_inf:
+            if self.playing:
+                with self._lock:
+                    self.elapsed = 0.0
+                    self._wall   = time.time()
+                self._spawn()
+        else:
             with self._lock:
                 if self.repeat:
                     self.elapsed = 0.0
@@ -497,144 +559,174 @@ class AudioEngine:
             if self.playing:
                 self._spawn()
 
-    def _stream_builtin(self, gen, trk, start_sec):
-        """Stream noise into ffplay pipe, or fall back to temp-WAV for Windows."""
+    # ── built-in noise streaming ──────────────────────────────────────────
+    def _play_builtin(self, gen, trk, start_sec):
         genre = trk.get("genre", "brown")
         genfn = _GENERATORS.get(genre, _gen_brown)
         state = {}
-
-        # Windows: winsound/powershell can't stream raw PCM → write temp WAV
-        if self._backend in ("winsound","powershell") or not shutil.which("ffplay"):
-            self._stream_builtin_file(gen, genfn, state, start_sec)
-            return
-
-        # Skip forward in generator state without playing
-        skip_chunks = int(start_sec * SR / self.CHUNK)
-        for _ in range(skip_chunks):
+        # Advance generator state to match start position (no audio output)
+        skip = int(start_sec * SR / self.CHUNK)
+        for _ in range(skip):
             if not self._alive(gen): return
             genfn(self.CHUNK, state)
 
-        proc = self._open_pipe()
-        if proc is None:
-            # No pipe backend — try file fallback
-            self._stream_builtin_file(gen, genfn, state, start_sec)
+        b = self._backend or ""
+        # ── sounddevice path (best: direct to OS audio, no subprocess) ────
+        if b == "sounddevice":
+            self._stream_sounddevice(gen, genfn, state)
+        # ── ffplay/aplay pipe path ─────────────────────────────────────────
+        elif b in ("ffplay","aplay") or (os.path.isfile(b) and "ffplay" in b.lower()):
+            self._stream_pipe(gen, genfn, state)
+        # ── WAV segment fallback (afplay / winsound) ───────────────────────
+        else:
+            self._stream_wav_segments(gen, genfn, state)
+
+    def _stream_sounddevice(self, gen, genfn, state):
+        """Play noise directly via sounddevice — gapless, zero subprocess."""
+        try:
+            import sounddevice as sd
+        except ImportError:
+            # Not installed yet — fall through to pipe/wav
+            self._stream_pipe(gen, genfn, state)
             return
 
-        with self._lock:
-            self._proc = proc
-
         try:
+            with sd.RawOutputStream(samplerate=SR, channels=1,
+                                    dtype='int16', blocksize=self.CHUNK) as stream:
+                while self._alive(gen):
+                    chunk = genfn(self.CHUNK, state)
+                    stream.write(chunk)   # blocks until OS buffer is ready
+        except Exception as e:
+            err = str(e).lower()
+            if "invalid device" in err or "no default" in err or "device unavailable" in err:
+                # No audio output device — fall back gracefully
+                self._stream_pipe(gen, genfn, state)
+            elif self._alive(gen):
+                # Other error — retry once via pipe
+                self._stream_pipe(gen, genfn, state)
+
+    def _stream_pipe(self, gen, genfn, state):
+        """Stream raw PCM into ffplay or aplay via stdin pipe."""
+        b = self._backend or ""
+        ffplay_bin = None
+        if b == "ffplay" or (os.path.isfile(b) and "ffplay" in b.lower()):
+            ffplay_bin = b
+        elif b == "afplay":
+            ffplay_bin = shutil.which("ffplay")
+        if ffplay_bin:
+            cmd = [ffplay_bin, "-f","s16le","-ar",str(SR),"-ac","1",
+                   "-nodisp","-loglevel","quiet","-autoexit","-"]
+        elif b == "aplay":
+            cmd = ["aplay","-f","S16_LE","-r",str(SR),"-c","1","--quiet"]
+        else:
+            self._stream_wav_segments(gen, genfn, state)
+            return
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+            with self._lock: self._proc = proc
             while self._alive(gen):
-                data = genfn(self.CHUNK, state)
                 try:
-                    proc.stdin.write(data)
+                    proc.stdin.write(genfn(self.CHUNK, state))
                     proc.stdin.flush()
                 except (BrokenPipeError, OSError):
                     break
-                time.sleep(self.CHUNK / SR * 0.6)  # pace to ~60% of realtime
+                time.sleep(self.CHUNK / SR * 0.5)
+        except Exception:
+            pass
         finally:
             try: proc.stdin.close()
             except: pass
             try: proc.wait(timeout=2)
             except: proc.terminate()
             with self._lock:
-                if self._proc is proc:
-                    self._proc = None
+                if self._proc is proc: self._proc = None
 
-    def _stream_builtin_file(self, gen, genfn, state, start_sec):
-        """Fallback: generate 60s WAV, play it, loop while alive."""
+    def _stream_wav_segments(self, gen, genfn, state):
+        """Generate 30s WAV files and play them in a loop (afplay / winsound)."""
         import tempfile, wave as wv
-        SEG = 60  # seconds per segment
+        SEG  = 30
+        SR_W = 22050 if self._backend == "winsound" else SR
+        dec  = SR // SR_W   # decimation factor
+
         while self._alive(gen):
-            n = SEG * SR
-            raw = genfn(n, state)
+            raw = genfn(SEG * SR, state)
+            if dec > 1:
+                import array as _a
+                s = _a.array('h', raw)
+                raw = _a.array('h', [s[i] for i in range(0, len(s), dec)]).tobytes()
+
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             try:
-                with wv.open(tmp.name,"wb") as wf:
-                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(SR)
+                with wv.open(tmp.name, "wb") as wf:
+                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(SR_W)
                     wf.writeframes(raw)
+            except Exception:
+                try: os.unlink(tmp.name)
+                except: pass
+                time.sleep(0.5)
+                continue
+
+            try:
                 b = self._backend
                 if b == "afplay":
-                    cmd = ["afplay", tmp.name]
+                    proc = subprocess.Popen(["afplay", tmp.name],
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+                    with self._lock: self._proc = proc
+                    while proc.poll() is None:
+                        if not self._alive(gen): proc.terminate(); return
+                        time.sleep(0.05)
                 elif b == "winsound":
                     import winsound
-                    winsound.PlaySound(tmp.name,
-                                      winsound.SND_FILENAME|winsound.SND_ASYNC)
-                    t0 = time.time()
-                    while time.time()-t0 < SEG:
+                    done = threading.Event()
+                    wav  = tmp.name
+                    def _play(p=wav, e=done):
+                        try: winsound.PlaySound(p, winsound.SND_FILENAME|winsound.SND_SYNC)
+                        except: pass
+                        finally: e.set()
+                    threading.Thread(target=_play, daemon=True).start()
+                    while not done.wait(0.1):
                         if not self._alive(gen):
-                            winsound.PlaySound(None, winsound.SND_PURGE)
+                            try: winsound.PlaySound(None, winsound.SND_PURGE)
+                            except: pass
+                            done.wait(1.0)
                             return
-                        time.sleep(0.05)
-                    continue
-                elif b == "powershell":
-                    script = (f"$p=(New-Object Media.SoundPlayer '{tmp.name}');"
-                              f"$p.PlaySync()")
-                    cmd = ["powershell","-NoProfile","-Command",script]
                 else:
-                    return
-                proc = subprocess.Popen(cmd,
-                                        stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL)
-                with self._lock: self._proc = proc
-                while proc.poll() is None:
-                    if not self._alive(gen): proc.terminate(); break
-                    time.sleep(0.05)
-                with self._lock:
-                    if self._proc is proc: self._proc = None
+                    time.sleep(SEG)
             finally:
                 try: os.unlink(tmp.name)
                 except: pass
 
-    def _open_pipe(self):
-        """Open ffplay/aplay subprocess ready to receive raw PCM on stdin."""
-        try:
-            if self._backend in ("ffplay",):
-                cmd = ["ffplay","-f","s16le","-ar",str(SR),"-ac","1",
-                       "-nodisp","-loglevel","quiet",
-                       "-"]
-            elif self._backend == "aplay":
-                cmd = ["aplay","-f","S16_LE","-r",str(SR),"-c","1","--quiet"]
-            elif self._backend == "afplay":
-                # afplay cannot read raw PCM from stdin — use ffplay if available
-                if shutil.which("ffplay"):
-                    cmd = ["ffplay","-f","s16le","-ar",str(SR),"-ac","1",
-                           "-nodisp","-loglevel","quiet","-"]
-                else:
-                    return None
-            else:
-                return None
-
-            return subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            return None
-
+    # ── file playback (user tracks) ───────────────────────────────────────
     def _play_file(self, gen, path, start_sec, duration):
-        """Play a local file via the detected backend."""
+        """Play a user audio file via best available backend."""
+        b  = self._backend or ""
+        ss = str(int(start_sec))
+
+        # sounddevice can't decode MP3/FLAC — use ffplay/subprocess for files
+        ffplay_bin = None
+        if b == "ffplay" or (os.path.isfile(b) and "ffplay" in b.lower()):
+            ffplay_bin = b
+        elif b == "sounddevice":
+            ffplay_bin = shutil.which("ffplay")
+
         try:
-            ss = str(int(start_sec))
-            b  = self._backend
-            if b == "ffplay":
-                cmd = ["ffplay","-nodisp","-loglevel","quiet","-ss",ss, path]
+            if ffplay_bin:
+                cmd = [ffplay_bin, "-nodisp","-loglevel","quiet","-ss",ss, path]
             elif b == "afplay":
                 cmd = ["afplay", path]
-                # afplay has no -ss; if start_sec>5 just play from beginning
-            elif b == "mpv":
-                cmd = ["mpv","--no-video","--really-quiet",f"--start={ss}", path]
-            elif b == "mplayer":
-                cmd = ["mplayer","-nogui","-really-quiet","-ss",ss, path]
+            elif b in ("mpv","mplayer"):
+                cmd = [b, "--no-video" if b=="mpv" else "-nogui",
+                       "--really-quiet" if b=="mpv" else "-really-quiet",
+                       f"--start={ss}" if b=="mpv" else "-ss", path]
             elif b == "aplay":
-                # aplay = raw only, redirect through ffplay
                 cmd = ["ffplay","-nodisp","-loglevel","quiet","-ss",ss, path]
             elif b == "winsound":
-                self._play_win_file(gen, path, duration - start_sec); return
-            elif b == "powershell":
-                self._play_ps_file(gen, path, duration - start_sec); return
+                self._play_win_winsound(gen, path, duration - start_sec); return
+            elif shutil.which("powershell"):
+                self._play_win_ps(gen, path); return
             else:
                 return
 
@@ -650,52 +742,60 @@ class AudioEngine:
         except Exception:
             pass
 
-    def _play_win_file(self, gen, path, remaining):
-        import winsound
-        # winsound only handles WAV; if mp3, convert to temp wav first via ffmpeg
-        import tempfile, wave as wv
-        if path.lower().endswith(".wav"):
-            wav_path = path
-            cleanup  = False
-        else:
-            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            wav_path = tmp.name; tmp.close(); cleanup = True
-            try:
-                subprocess.run(["ffmpeg","-y","-i",path,"-ar","44100",
-                                "-ac","1","-f","wav", wav_path],
-                               capture_output=True, timeout=30)
-            except Exception:
-                if cleanup:
+    def _play_win_winsound(self, gen, path, remaining):
+        import winsound, tempfile, wave as wv
+        # Convert to WAV via ffmpeg if available, else try direct
+        wav_path = path; cleanup = False
+        if not path.lower().endswith(".wav"):
+            ffmpeg = shutil.which("ffmpeg")
+            if ffmpeg:
+                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                wav_path = tmp.name; tmp.close(); cleanup = True
+                try:
+                    subprocess.run([ffmpeg,"-y","-i",path,"-ar","22050",
+                                    "-ac","1","-f","wav", wav_path],
+                                   capture_output=True, timeout=30)
+                except Exception:
                     try: os.unlink(wav_path)
                     except: pass
-                return
+                    return
+            else:
+                return  # can't play non-WAV without ffmpeg
         try:
-            winsound.PlaySound(wav_path, winsound.SND_FILENAME|winsound.SND_ASYNC)
-            t0 = time.time()
-            while time.time()-t0 < remaining:
+            done = threading.Event()
+            def _pl(p=wav_path, e=done):
+                try: winsound.PlaySound(p, winsound.SND_FILENAME|winsound.SND_SYNC)
+                except: pass
+                finally: e.set()
+            threading.Thread(target=_pl, daemon=True).start()
+            while not done.wait(0.1):
                 if not self._alive(gen):
-                    winsound.PlaySound(None, winsound.SND_PURGE); break
-                time.sleep(0.05)
-        except Exception:
-            pass
+                    try: winsound.PlaySound(None, winsound.SND_PURGE)
+                    except: pass
+                    done.wait(1.0); return
         finally:
             if cleanup:
                 try: os.unlink(wav_path)
                 except: pass
 
-    def _play_ps_file(self, gen, path, remaining):
+    def _play_win_ps(self, gen, path):
         try:
-            script = (f"Add-Type -AssemblyName presentationCore;"
-                      f"$m=[System.Windows.Media.MediaPlayer]::new();"
-                      f"$m.Open([Uri]::new('{path}'));$m.Play();"
-                      f"Start-Sleep {max(1,int(remaining))}")
+            uri = path.replace("\\", "/")
+            script = (
+                "Add-Type -AssemblyName presentationCore;"
+                "$m=[System.Windows.Media.MediaPlayer]::new();"
+                "$m.Open([Uri]::new('" + uri + "'));$m.Play();"
+                "Start-Sleep -Seconds 3600"
+            )
             proc = subprocess.Popen(
-                ["powershell","-NoProfile","-Command",script],
+                ["powershell","-NoProfile","-NonInteractive","-Command",script],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             with self._lock: self._proc = proc
             while proc.poll() is None:
                 if not self._alive(gen): proc.terminate(); break
-                time.sleep(0.05)
+                time.sleep(0.1)
+            with self._lock:
+                if self._proc is proc: self._proc = None
         except Exception:
             pass
 
@@ -843,6 +943,8 @@ class SysData:
         self.cpu_cores = os.cpu_count() or 1
         self._pnet     = None
         self._boot     = psutil.boot_time() if HAS_PSUTIL else time.time()
+        self.devices   = []   # list of dicts: name,type,connected,battery
+        self._dev_last = 0.0  # last device scan time
 
     @staticmethod
     def _os():
@@ -935,6 +1037,205 @@ class SysData:
             return ip
         except: return "127.0.0.1"
 
+    @staticmethod
+    def _scan_devices():
+        """Scan real connected devices: Bluetooth, USB, HID. Cross-platform."""
+        devs = []
+        sys_name = platform.system()
+
+        if sys_name == "Windows":
+            # Words that indicate a BT service profile, not a real device
+            _BT_SVC = {
+                "avrcp","pbap","pan","hfp","hsp","gatt","sdp","rfcomm","obex",
+                "map","nap","pse","tra","panu","service","profile","gateway",
+                "push","network","generic","personal area","headset audio",
+                "handsfree","audio sink","advanced audio","attribute",
+                "object push","hands-f","hands-free","a2dp","bnep","dip",
+                "streaming","enumerator","radio","adapter",
+            }
+            # Words that mean the entry is junk (built-in, virtual, or noise)
+            _JUNK = {
+                "hid-compliant","usb input device","usb root","host controller",
+                "composite","hub","microsoft","realtek","intel","generic usb",
+                "portable device control","system control","consumer contr",
+                "vendor-defined","unknown device",
+            }
+            # Shared name-dedup set across both BT and USB scans
+            seen_names = set()
+
+            # ── BT: only real device names (phones, earbuds, keyboards…) ──
+            bt_names = {}   # name -> entry, for battery lookup later
+            try:
+                ps = (
+                    "Get-PnpDevice -Class Bluetooth -Status OK 2>$null | "
+                    "Select-Object FriendlyName,InstanceId | "
+                    "ConvertTo-Csv -NoTypeInformation"
+                )
+                r = subprocess.run(["powershell","-NoProfile","-Command", ps],
+                                   capture_output=True, text=True, timeout=6)
+                for line in r.stdout.splitlines()[1:]:
+                    # CSV: "FriendlyName","InstanceId"
+                    parts = line.strip().split('","')
+                    name = parts[0].strip('"').strip()
+                    if not name: continue
+                    nl = name.lower()
+                    # skip anything that looks like a service / protocol / adapter
+                    if any(x in nl for x in _BT_SVC): continue
+                    if any(x in nl for x in _JUNK):   continue
+                    # normalise for dedup: first two words lowercase
+                    key = " ".join(nl.split()[:2])
+                    if key in seen_names: continue
+                    seen_names.add(key)
+                    entry = {"name": name[:30], "type": "BT",
+                             "connected": True, "battery": None}
+                    devs.append(entry)
+                    bt_names[key] = entry
+            except Exception: pass
+
+            # ── Battery via GATT (most reliable on Win10+) ────────────────
+            try:
+                # Query GATT Battery Service under each Bluetooth device
+                ps_bat = (
+                    "Get-PnpDevice -Class Bluetooth -Status OK 2>$null | "
+                    "ForEach-Object {"
+                    "  $n=$_.FriendlyName; "
+                    "  $reg='HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\'+$_.InstanceId;"
+                    "  $b=(Get-ItemProperty -Path $reg -Name BatteryLevel "
+                    "       -ErrorAction SilentlyContinue).BatteryLevel;"
+                    "  if($b -ne $null){"
+                    "    [PSCustomObject]@{Name=$n;Bat=[int]$b}"
+                    "  }"
+                    "} | ConvertTo-Csv -NoTypeInformation"
+                )
+                r_bat = subprocess.run(
+                    ["powershell","-NoProfile","-Command", ps_bat],
+                    capture_output=True, text=True, timeout=8)
+                for line in r_bat.stdout.splitlines()[1:]:
+                    parts = line.strip().split('","')
+                    if len(parts) < 2: continue
+                    bname = parts[0].strip('"').strip()
+                    bval  = parts[1].strip('"').strip().rstrip('"')
+                    if not bval.lstrip('-').isdigit(): continue
+                    bint  = int(bval)
+                    if not (0 <= bint <= 100): continue
+                    bkey  = " ".join(bname.lower().split()[:2])
+                    if bkey in bt_names:
+                        bt_names[bkey]["battery"] = bint
+            except Exception: pass
+
+            # ── USB / external devices (NOT built-in, NOT BT duplicates) ──
+            try:
+                ps2 = (
+                    "Get-WmiObject Win32_PnPEntity | "
+                    "Where-Object {"
+                    "  $_.PNPClass -in @('WPD','DiskDrive','CDROM') -or "
+                    "  ($_.PNPClass -eq 'HIDClass' -and "
+                    "   $_.Name -match 'Xbox|Controller|Gamepad|Joystick') -or "
+                    "  ($_.PNPClass -eq 'USB' -and "
+                    "   $_.Name -notmatch 'Hub|Root|Host|Composite|Unknown|Microsoft|Intel')"
+                    "} | Select-Object Name,PNPClass | ConvertTo-Csv -NoTypeInformation"
+                )
+                r2 = subprocess.run(["powershell","-NoProfile","-Command", ps2],
+                                    capture_output=True, text=True, timeout=8)
+                for line in r2.stdout.splitlines()[1:]:
+                    parts = line.strip().split('","')
+                    if len(parts) < 2: continue
+                    name = parts[0].strip('"').strip()
+                    cls  = parts[1].strip('"').strip().rstrip('"')
+                    if not name: continue
+                    nl = name.lower()
+                    # skip junk and anything already added via BT
+                    if any(x in nl for x in _JUNK):    continue
+                    if any(x in nl for x in _BT_SVC):  continue
+                    key = " ".join(nl.split()[:2])
+                    if key in seen_names: continue
+                    seen_names.add(key)
+                    # classify
+                    if any(x in nl for x in ("xbox","controller","gamepad","joystick")):
+                        dtype = "CTRL"
+                    elif any(x in nl for x in ("phone","android","iphone","mobile","adb")):
+                        dtype = "PHONE"
+                    elif any(x in nl for x in ("camera","webcam","imaging")):
+                        dtype = "CAM"
+                    elif any(x in nl for x in ("headset","headphone","earphone","buds","airpod")):
+                        dtype = "AUDIO"
+                    elif any(x in nl for x in ("storage","disk","drive","flash","ssd","hdd")):
+                        dtype = "STOR"
+                    elif any(x in nl for x in ("mouse","trackpad","touchpad")):
+                        dtype = "MOUSE"
+                    elif any(x in nl for x in ("keyboard","kbd")):
+                        dtype = "KBD"
+                    elif cls in ("WPD",):
+                        dtype = "MTP"
+                    else:
+                        dtype = "USB"
+                    devs.append({"name": name[:30], "type": dtype,
+                                 "connected": True, "battery": None})
+            except Exception: pass
+
+        elif sys_name == "Darwin":
+            # ── macOS: system_profiler for BT + USB ──────────────────────
+            try:
+                r = subprocess.run(
+                    ["system_profiler","SPBluetoothDataType","-json"],
+                    capture_output=True, text=True, timeout=5)
+                import json as _json
+                data = _json.loads(r.stdout)
+                bt_data = data.get("SPBluetoothDataType",[{}])[0]
+                connected = bt_data.get("device_connected", [])
+                for entry in connected:
+                    for name, info in entry.items():
+                        bat = None
+                        bat_str = str(info.get("device_batteryLevelMain",""))
+                        if bat_str.replace("%","").isdigit():
+                            bat = int(bat_str.replace("%",""))
+                        devs.append({"name":name[:28],"type":"BT",
+                                     "connected":True,"battery":bat})
+            except Exception: pass
+            try:
+                r = subprocess.run(
+                    ["system_profiler","SPUSBDataType","-json"],
+                    capture_output=True, text=True, timeout=5)
+                import json as _json
+                data = _json.loads(r.stdout)
+                def _walk_usb(items):
+                    for item in items:
+                        for k,v in item.items():
+                            if isinstance(v, dict):
+                                name = v.get("_name","")
+                                if name and "hub" not in name.lower():
+                                    devs.append({"name":name[:28],"type":"USB",
+                                                 "connected":True,"battery":None})
+                                _walk_usb(v.get("_items",[]))
+                _walk_usb(data.get("SPUSBDataType",[]))
+            except Exception: pass
+
+        else:  # Linux
+            # ── Bluetooth via bluetoothctl ────────────────────────────────
+            try:
+                r = subprocess.run(["bluetoothctl","devices","Connected"],
+                                   capture_output=True, text=True, timeout=3)
+                for line in r.stdout.splitlines():
+                    parts = line.split(None, 2)
+                    if len(parts) >= 3 and parts[0]=="Device":
+                        devs.append({"name":parts[2][:28],"type":"BT",
+                                     "connected":True,"battery":None})
+            except Exception: pass
+            # ── USB via lsusb ─────────────────────────────────────────────
+            try:
+                r = subprocess.run(["lsusb"], capture_output=True, text=True, timeout=3)
+                for line in r.stdout.splitlines():
+                    # "Bus 001 Device 002: ID 1234:5678 Vendor Product Name"
+                    if ":" in line:
+                        name = line.split(":",1)[1].strip().split("ID")[0]
+                        name = name.strip()
+                        if name and "Hub" not in name and "root" not in name.lower():
+                            devs.append({"name":name[:28],"type":"USB",
+                                         "connected":True,"battery":None})
+            except Exception: pass
+
+        return devs[:16]   # cap at 16 devices
+
     def poll(self):
         if not HAS_PSUTIL: return
         with self._lock:
@@ -961,6 +1262,10 @@ class SysData:
             except: pass
             try: self.uptime = int(time.time()-self._boot)
             except: pass
+        # Scan devices every 5 seconds (slow operation)
+        if time.time() - self._dev_last > 5:
+            self._dev_last = time.time()
+            self.devices = self._scan_devices()
 
     def snap(self):
         with self._lock:
@@ -1165,7 +1470,7 @@ def v_dashboard(win, W, H):
     todo_inner = max(2, H - reserved)
     todo_h     = todo_inner + 2 + (1 if ST.todo_add else 0)
     box(win, 11, 0, todo_h, W-1,
-        "TODOS  [a]=add  [d]=del  [j/k]=nav  [SPC]=check")
+        "TODOS  [a]=add  [d]=del  [j/k]=nav  [ENTER]=check")
     visible_n = todo_inner
     start = max(0, ST.todo_cur - visible_n + 1) if len(ST.todos) > visible_n else 0
 
@@ -1215,7 +1520,7 @@ def v_dashboard(win, W, H):
         draw_spectrum(win, vy+1, 1, vis_h, W-3, spec)
 
     put(win, H-1, 0,
-        " [p] pomo  [r] reset  [a] add todo  [d] del  [←→/TAB] views  [q] quit ",
+        " [ENTER]=check  [p] pomo  [r] reset  [a] add  [d] del  [space]=music  [←→] views  [q] quit ",
         cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1247,12 +1552,19 @@ def v_clock(win, W, H):
     dm,ds2 = divmod(int(dur), 60) if dur > 0 else (0, 0)
 
     box(win, my, mx, 12, mw, "NOW PLAYING")
-    # loading indicator if track not ready
-    if AUDIO.track_idx not in AUDIO._pcm_cache:
-        put(win, my+1, mx+2, "⠋ Synthesizing track…", cp(P_AMBER))
+    put(win, my+1, mx+2, td["name"][:mw-4], cp(P_HI, bold=True))
+    genre = td.get("genre","")
+    genre_lbl = {"brown":"Brown Noise","pink":"Pink Noise","white":"White Noise",
+                 "rain":"Rain on Glass","space":"Deep Space"}.get(genre,"")
+    sub = f"[{genre_lbl}]  {td['artist']}" if genre_lbl else f"by {td['artist']}"
+    put(win, my+2, mx+2, sub[:mw-4], cp(P_DIM))
+    # Show audio backend or NO AUDIO warning
+    if not AUDIO._backend:
+        put(win, my+1, mx+mw-22, "! NO AUDIO BACKEND !", cp(P_RED, bold=True))
+        put(win, my+2, mx+2, "  pip install sounddevice  OR  install ffmpeg", cp(P_AMBER))
     else:
-        put(win, my+1, mx+2, td["name"][:mw-4],       cp(P_HI, bold=True))
-    put(win, my+2, mx+2, f"by {td['artist']}"[:mw-4], cp(P_DIM))
+        bname = os.path.basename(AUDIO._backend) if os.path.isfile(AUDIO._backend) else AUDIO._backend
+        put(win, my+1, mx+mw-len(bname)-4, bname, cp(P_DIM))
 
     hbar(win, my+3, mx+2, mw-4, pct, P_CYAN)
     put(win, my+4, mx+2, f"{em}:{es:02d}", cp(P_DIM))
@@ -1491,29 +1803,61 @@ def v_network(win, W, H):
     put(win,12,2,"CPU ",cp(P_DIM)); hbar(win,12,7,hw-10,int(sd["cpu"]),P_CYAN)
 
     rx=hw+1; rw=W-rx-1
-    box(win,1,rx,14,rw,"CONNECTED DEVICES")
-    devices=[("AirPods Pro","BT",78,True),("Magic Keyboard","BT",42,True),
-             ("Magic Mouse","BT",11,True),("iPhone 15 Pro","BT",91,False),
-             ("Ext. Display","USB",None,True),("USB-C Hub","USB",None,True)]
-    for i,(name,dtype,bat,conn) in enumerate(devices):
-        dy=2+i*2
-        if 1+dy+1>=15: break
-        cs="● CONN" if conn else "○ DISC"
-        cc=P_GREEN if conn else P_DIM
-        put(win,1+dy,rx+2,name[:rw-12],cp(P_MID))
-        put(win,1+dy,rx+rw-6,f"[{dtype}]",cp(P_DIM))
-        put(win,2+dy,rx+2,cs,cp(cc))
-        if bat is not None:
-            bc=P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
-            put(win,2+dy,rx+rw-7,f"{bat:3d}%",cp(bc))
+    devices = SD.devices   # real scanned devices from SysData
+    # type colour map
+    _tc = {"BT":P_CYAN,"USB":P_BLUE,"CTRL":P_PINK,"PHONE":P_GREEN,
+            "AUDIO":P_AMBER,"KBD":P_DIM,"HID":P_DIM,"CAM":P_DIM,
+            "STOR":P_MID,"MTP":P_GREEN,"USB-C":P_BLUE}
+
+    max_rows = min(len(devices), (14-2))
+    box(win,1,rx,max(6, max_rows*2+2),rw,
+        f"CONNECTED DEVICES ({len(devices)})" if devices else "CONNECTED DEVICES")
+
+    if not devices:
+        put(win,3,rx+2,"No devices found",cp(P_DIM))
+        put(win,4,rx+2,"(scanning...)" if SD._dev_last==0 else "(none connected)",cp(P_DIM))
+    else:
+        for i, dev in enumerate(devices[:max_rows]):
+            ry  = 2 + i
+            bat = dev.get("battery")
+            dtype = dev.get("type","")
+            # Right side: battery% if known, else device type tag (non-BT only)
+            if bat is not None:
+                bc      = P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
+                right_s = f"{bat}%"
+                right_c = cp(bc, bold=True)
+            elif dtype != "BT":
+                right_s = f"[{dtype}]"
+                right_c = cp(_tc.get(dtype, P_DIM))
+            else:
+                right_s = ""
+                right_c = 0
+            name_w = rw - len(right_s) - 4
+            put(win, ry, rx+2, dev["name"][:name_w], cp(P_HI))
+            if right_s:
+                put(win, ry, rx+rw-len(right_s)-2, right_s, right_c)
 
     bat=sd["bat_pct"]; plug=sd["bat_plug"]
     bc=P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
-    box(win,16,0,7,W-1,"BATTERY & POWER")
-    put(win,17,2,f"{'+ CHARGING' if plug else '  ON BATTERY'}  {bat}%",cp(bc,bold=True))
-    hbar(win,18,2,W-5,bat,bc)
-    put(win,19,2,"charging" if plug else f"~{int(bat*1.5)} min remaining",cp(P_DIM))
-    put(win,20,2,f"cpu {sd['cpu']:.0f}%  mem {sd['mem_pct']:.0f}%  disk {sd['disk_pct']:.0f}%",cp(P_DIM))
+    # dynamic Y position based on device list height
+    n_devs   = min(len(SD.devices), 14)
+    bat_y    = max(16, 3 + n_devs + 2)
+    box(win,bat_y,0,7,W-1,"BATTERY & POWER")
+    put(win,bat_y+1,2,f"{'+ CHARGING' if plug else '  ON BATTERY'}  {bat}%  system",cp(bc,bold=True))
+    hbar(win,bat_y+2,2,W-5,bat,bc)
+    put(win,bat_y+3,2,"charging" if plug else f"~{int(bat*1.5)} min remaining",cp(P_DIM))
+    # show BT device battery levels inline
+    bt_bats = [(d["name"][:14],d["battery"]) for d in SD.devices
+               if d.get("battery") is not None]
+    if bt_bats:
+        bx = 2
+        for dname,dbat in bt_bats[:4]:
+            dbc = P_GREEN if dbat>40 else (P_AMBER if dbat>15 else P_RED)
+            s = f"{dname}: {dbat}%  "
+            put(win,bat_y+4,bx,s,cp(dbc))
+            bx += len(s)
+    else:
+        put(win,bat_y+4,2,f"cpu {sd['cpu']:.0f}%  mem {sd['mem_pct']:.0f}%  disk {sd['disk_pct']:.0f}%",cp(P_DIM))
 
     # spectrum strip
     vy=24; vis_h=max(2,H-vy-3)
@@ -1742,8 +2086,8 @@ def handle_key(k):
         ST.view = (v - 1) % len(VIEWS)
         return
 
-    # ── GLOBAL MUSIC CONTROLS (all views) ────────────────────────────────
-    if k == ord(' '):  AUDIO.toggle_play(); return
+    # ── GLOBAL MUSIC CONTROLS (all views except dashboard where space=todo) ─
+    if k == ord(' ') and v != 0:  AUDIO.toggle_play(); return
     if k == ord('z'):  AUDIO.prev_track();  return
     if k == ord('x'):  AUDIO.next_track();  return
     if k == ord('s') and v != 2:  AUDIO.shuffle = not AUDIO.shuffle; return
@@ -1753,9 +2097,10 @@ def handle_key(k):
     if v == 0:  # dashboard
         if k in (curses.KEY_UP,   ord('k')): ST.todo_cur = max(0, ST.todo_cur - 1)
         elif k in (curses.KEY_DOWN, ord('j')): ST.todo_cur = min(len(ST.todos)-1, ST.todo_cur+1)
-        elif k == 32 and ST.todos:
+        elif k in (10, 13) and ST.todos:     # ENTER = tick/untick todo
             ST.todos[ST.todo_cur][0] ^= True
             save_todos(ST.todos)
+        elif k == ord(' '):  AUDIO.toggle_play()  # space still plays music
         elif k == ord('a'): ST.todo_add = True; ST.todo_buf = ""
         elif k == ord('d') and ST.todos:
             ST.todos.pop(ST.todo_cur)
@@ -1834,25 +2179,33 @@ def main(stdscr):
         if k!=-1: handle_key(k)
 
 if __name__=="__main__":
-    backend_name = AUDIO._backend or "none (no audio)"
-    print(f"""
-  Terminal StandBy v3
-  ───────────────────────────────────────────────
-  Audio backend : {backend_name}
-  Platform      : {platform.system()} {platform.release()}
-  psutil        : {'yes' if HAS_PSUTIL else 'no — install for real stats'}
-  ───────────────────────────────────────────────
-  First launch synthesizes tracks in background.
-  You'll hear music within a few seconds of start.
-
-  Controls:  ←/→ or h/l  switch views
-             SPACE        play / pause
-             z / x        prev / next track
-             q            quit
-  ───────────────────────────────────────────────
-  Starting…
+    backend = AUDIO._backend or ""
+    if not backend:
+        print("""
+  ╔══════════════════════════════════════════════════╗
+  ║  NO AUDIO BACKEND FOUND                          ║
+  ║                                                  ║
+  ║  Install one of these (pick any):                ║
+  ║                                                  ║
+  ║  Option 1 — Python audio (recommended):          ║
+  ║    pip install sounddevice                       ║
+  ║                                                  ║
+  ║  Option 2 — ffmpeg (also needed for YouTube):    ║
+  ║    winget install ffmpeg       (Windows)         ║
+  ║    brew install ffmpeg         (macOS)           ║
+  ║    sudo apt install ffmpeg     (Linux)           ║
+  ║                                                  ║
+  ║  The app will still run without audio.           ║
+  ╚══════════════════════════════════════════════════╝
 """)
-    time.sleep(0.5)
+        time.sleep(1)
+    else:
+        bname = os.path.basename(backend) if os.path.isfile(backend) else backend
+        print(f"""
+  Terminal StandBy  |  audio: {bname}  |  {platform.system()}
+  SPACE=play/pause  z/x=prev/next  ←/→=views  q=quit
+""")
+    time.sleep(0.3)
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:
