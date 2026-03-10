@@ -134,6 +134,144 @@ def midi(n):   return 440.0 * 2**((n-69)/12)
 import array as _array
 
 LIBRARY_FILE = os.path.join(os.path.expanduser("~"), ".terminal_standby_music.json")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CALENDAR ENGINE  — reads ICS (Google/Apple) + local JSON events
+# ══════════════════════════════════════════════════════════════════════════════
+CAL_FILE  = os.path.join(os.path.expanduser("~"), ".terminal_standby_cal.json")
+CAL_ICS   = os.path.join(os.path.expanduser("~"), ".terminal_standby.ics")
+_CAL_LOCK = threading.Lock()
+_CAL_EVENTS = []          # list of (datetime, datetime, str title)
+_CAL_STATUS = ""          # shown in calendar view
+
+
+def _parse_ics_date(val):
+    """Parse DTSTART / DTEND values (may be DATE or DATETIME)."""
+    val = val.split(";")[-1].split(":")[-1].strip()
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%M%S", "%Y%m%d"):
+        try:
+            return datetime.datetime.strptime(val, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_ics(text):
+    """Parse an ICS file/string → list of (start_dt, end_dt, title)."""
+    events = []
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    # Unfold continuation lines
+    unfolded = []
+    for line in lines:
+        if line.startswith((" ", "\t")) and unfolded:
+            unfolded[-1] += line[1:]
+        else:
+            unfolded.append(line)
+    i, in_ev = 0, False
+    start = end = title = None
+    while i < len(unfolded):
+        line = unfolded[i]
+        if line.strip() == "BEGIN:VEVENT":
+            in_ev = True; start = end = title = None
+        elif line.strip() == "END:VEVENT" and in_ev:
+            if start and title:
+                events.append((start, end or start, title))
+            in_ev = False
+        elif in_ev:
+            if line.startswith("DTSTART"):
+                start = _parse_ics_date(line)
+            elif line.startswith("DTEND"):
+                end   = _parse_ics_date(line)
+            elif line.startswith("SUMMARY"):
+                title = line.split(":", 1)[-1].strip()[:50]
+        i += 1
+    return sorted(events, key=lambda e: e[0])
+
+
+def load_calendar_events():
+    """Load events from: ICS file + local JSON. Returns sorted list."""
+    evs = []
+    # Local JSON events
+    try:
+        with open(CAL_FILE) as f:
+            for e in json.load(f):
+                dt_str = e.get("dt","")
+                for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                    try:
+                        dt = datetime.datetime.strptime(dt_str, fmt); break
+                    except: dt = None
+                if dt: evs.append((dt, dt, e.get("title","Event")[:50]))
+    except Exception: pass
+    # ICS file (Google Cal / Apple Cal export)
+    try:
+        with open(CAL_ICS, encoding="utf-8", errors="replace") as f:
+            evs += _parse_ics(f.read())
+    except Exception: pass
+    return sorted(set(evs), key=lambda e: e[0])
+
+
+def save_local_events(local_evs):
+    """Save manual JSON events (ICS events are not modified)."""
+    try:
+        with open(CAL_FILE, "w") as f:
+            json.dump(local_evs, f, indent=2)
+    except Exception: pass
+
+
+def refresh_calendar():
+    """Reload calendar events into _CAL_EVENTS. Call in background."""
+    global _CAL_EVENTS, _CAL_STATUS
+    evs = load_calendar_events()
+    with _CAL_LOCK:
+        _CAL_EVENTS = evs
+    _CAL_STATUS = f"Loaded {len(evs)} events"
+
+
+def fetch_ics_url(url):
+    """Download an ICS URL and save to CAL_ICS. Returns (ok, msg)."""
+    global _CAL_STATUS
+    try:
+        import urllib.request
+        _CAL_STATUS = "Fetching calendar..."
+        req = urllib.request.Request(url, headers={"User-Agent": "TerminalStandBy/3"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read().decode("utf-8", errors="replace")
+        if "BEGIN:VCALENDAR" not in data:
+            _CAL_STATUS = "ERROR: Not a valid ICS file"
+            return False, "Not a valid ICS"
+        with open(CAL_ICS, "w", encoding="utf-8") as f:
+            f.write(data)
+        refresh_calendar()
+        _CAL_STATUS = f"Synced {len(_CAL_EVENTS)} events"
+        return True, f"Synced {len(_CAL_EVENTS)} events"
+    except Exception as e:
+        _CAL_STATUS = f"ERROR: {e}"
+        return False, str(e)
+
+
+def get_next_event():
+    """Return (title, time_str) for the next upcoming event."""
+    now = datetime.datetime.now()
+    with _CAL_LOCK:
+        evs = list(_CAL_EVENTS)
+    for start, end, title in evs:
+        if start > now:
+            diff = int((start - now).total_seconds())
+            hh, rem = divmod(diff, 3600); mm = rem // 60
+            ts = f"{start.strftime('%H:%M')}  {title}"
+            remaining = f"in {hh}h {mm:02d}m" if hh > 0 else f"in {mm}m"
+            return ts[:40], remaining
+    # Check today's events that may be ongoing
+    for start, end, title in evs:
+        if start.date() == now.date() and start <= now:
+            return f"{start.strftime('%H:%M')}  {title}"[:40], "ongoing"
+    return "No events today", ""
+
+
+# Load events at startup in background
+threading.Thread(target=refresh_calendar, daemon=True).start()
+
+
 CACHE_DIR    = os.path.join(os.path.expanduser("~"), ".terminal_standby_cache")
 SR = 44100
 
@@ -190,21 +328,25 @@ BUILTIN_TRACKS = [
 # ── Noise generators (streaming, return bytes per chunk) ─────────────────────
 
 def _gen_brown(n, state):
-    """Brown noise: integrated white noise → deep bass rumble."""
-    out  = _array.array('h')
-    last = state.get('b', 0.0)
+    """Brown noise: double-integrated white noise — very deep, smooth rumble."""
+    out   = _array.array('h')
+    b1    = state.get('b1', 0.0)   # first integrator
+    b2    = state.get('b2', 0.0)   # second integrator (extra bass smoothing)
     for _ in range(n):
         white = random.gauss(0, 1.0)
-        last  = last * 0.998 + white * 0.002   # leaky integrator
-        v = max(-32767, min(32767, int(last * 26000)))
+        b1    = b1 * 0.998 + white * 0.002
+        b2    = b2 * 0.995 + b1   * 0.005   # smooth again → softer, deeper
+        v = max(-32767, min(32767, int(b2 * 18000)))  # lower amplitude
         out.append(v)
-    state['b'] = last
+    state['b1'] = b1
+    state['b2'] = b2
     return out.tobytes()
 
 def _gen_pink(n, state):
-    """Pink noise (1/f): Voss-McCartney algorithm."""
-    b = state.get('b', [0.0]*7)
-    out = _array.array('h')
+    """Pink noise (1/f): Voss-McCartney + gentle low-pass for softness."""
+    b    = state.get('b', [0.0]*7)
+    prev = state.get('p', 0.0)   # low-pass state
+    out  = _array.array('h')
     for _ in range(n):
         w = random.gauss(0, 1.0)
         b[0] = 0.99886*b[0] + w*0.0555179
@@ -215,9 +357,12 @@ def _gen_pink(n, state):
         b[5] = -0.7616*b[5] - w*0.0168980
         pink = (b[0]+b[1]+b[2]+b[3]+b[4]+b[5]+b[6]+w*0.5362) * 0.11
         b[6] = w * 0.115926
-        v = max(-32767, min(32767, int(pink * 28000)))
+        # Single-pole low-pass @ ~8kHz cutoff → removes harshness
+        prev = prev * 0.85 + pink * 0.15
+        v = max(-32767, min(32767, int(prev * 18000)))  # lower amplitude
         out.append(v)
     state['b'] = b
+    state['p'] = prev
     return out.tobytes()
 
 def _gen_white(n, _state):
@@ -943,8 +1088,9 @@ class SysData:
         self.cpu_cores = os.cpu_count() or 1
         self._pnet     = None
         self._boot     = psutil.boot_time() if HAS_PSUTIL else time.time()
-        self.devices   = []   # list of dicts: name,type,connected,battery
-        self._dev_last = 0.0  # last device scan time
+        self.devices       = []   # list of dicts: name,type,connected,battery
+        self._dev_last     = 0.0  # last device scan time
+        self._dev_scanning = False
 
     @staticmethod
     def _os():
@@ -1044,113 +1190,181 @@ class SysData:
         sys_name = platform.system()
 
         if sys_name == "Windows":
-            # Words that indicate a BT service profile, not a real device
-            _BT_SVC = {
+            # ── Step 1: get CURRENTLY CONNECTED BT devices via IsConnected prop ──
+            # DEVPKEY_Device_IsConnected = {83DA6326-97A6-4088-9453-A1923F573B29} 15
+            # This is the correct "right now connected" flag — NOT Status OK
+            _SKIP = {
                 "avrcp","pbap","pan","hfp","hsp","gatt","sdp","rfcomm","obex",
-                "map","nap","pse","tra","panu","service","profile","gateway",
-                "push","network","generic","personal area","headset audio",
-                "handsfree","audio sink","advanced audio","attribute",
-                "object push","hands-f","hands-free","a2dp","bnep","dip",
-                "streaming","enumerator","radio","adapter",
+                "map","nap","pse","panu","service","profile","gateway","push",
+                "network","generic","personal area","headset audio","handsfree",
+                "audio sink","advanced audio","attribute","object push","a2dp",
+                "bnep","dip","streaming","enumerator","radio","adapter","hands-f",
             }
-            # Words that mean the entry is junk (built-in, virtual, or noise)
             _JUNK = {
                 "hid-compliant","usb input device","usb root","host controller",
                 "composite","hub","microsoft","realtek","intel","generic usb",
                 "portable device control","system control","consumer contr",
                 "vendor-defined","unknown device",
             }
-            # Shared name-dedup set across both BT and USB scans
+
+            bt_names = {}   # key -> entry dict, for battery fill-in
             seen_names = set()
 
-            # ── BT: only real device names (phones, earbuds, keyboards…) ──
-            bt_names = {}   # name -> entry, for battery lookup later
+            # BT: query IsConnected property for every BT device
             try:
-                ps = (
-                    "Get-PnpDevice -Class Bluetooth -Status OK 2>$null | "
-                    "Select-Object FriendlyName,InstanceId | "
-                    "ConvertTo-Csv -NoTypeInformation"
+                ps_bt = (
+                    "$skip=@('avrcp','pbap','hfp','hsp','gatt','sdp','rfcomm',"
+                    "'obex','map','nap','pse','panu','service','profile','gateway',"
+                    "'push','network','personal area','headset audio','handsfree',"
+                    "'audio sink','advanced audio','attribute','object push','a2dp',"
+                    "'bnep','streaming','enumerator','radio','adapter','hands-f');"
+                    "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue |"
+                    " ForEach-Object {"
+                    "  $conn=(Get-PnpDeviceProperty -InstanceId $_.InstanceId"
+                    "   -KeyName '{83DA6326-97A6-4088-9453-A1923F573B29} 15'"
+                    "   -ErrorAction SilentlyContinue).Data;"
+                    "  if($conn -eq $true){"
+                    "    $nl=$_.FriendlyName.ToLower();"
+                    "    $bad=$false;"
+                    "    foreach($s in $skip){if($nl.Contains($s)){$bad=$true;break}}"
+                    "    if(-not $bad){"
+                    "      Write-Output ($_.FriendlyName+'|'+$_.InstanceId)"
+                    "    }"
+                    "  }"
+                    "}"
                 )
-                r = subprocess.run(["powershell","-NoProfile","-Command", ps],
-                                   capture_output=True, text=True, timeout=6)
-                for line in r.stdout.splitlines()[1:]:
-                    # CSV: "FriendlyName","InstanceId"
-                    parts = line.strip().split('","')
-                    name = parts[0].strip('"').strip()
+                r_bt = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_bt],
+                    capture_output=True, text=True, timeout=10)
+                for line in r_bt.stdout.strip().splitlines():
+                    line = line.strip()
+                    if "|" not in line: continue
+                    name, iid = line.split("|", 1)
+                    name = name.strip(); iid = iid.strip()
                     if not name: continue
-                    nl = name.lower()
-                    # skip anything that looks like a service / protocol / adapter
-                    if any(x in nl for x in _BT_SVC): continue
-                    if any(x in nl for x in _JUNK):   continue
-                    # normalise for dedup: first two words lowercase
+                    nl  = name.lower()
+                    if any(x in nl for x in _SKIP): continue
+                    if any(x in nl for x in _JUNK): continue
                     key = " ".join(nl.split()[:2])
                     if key in seen_names: continue
                     seen_names.add(key)
                     entry = {"name": name[:30], "type": "BT",
-                             "connected": True, "battery": None}
+                             "connected": True, "battery": None, "_iid": iid}
                     devs.append(entry)
                     bt_names[key] = entry
             except Exception: pass
 
-            # ── Battery via GATT (most reliable on Win10+) ────────────────
-            try:
-                # Query GATT Battery Service under each Bluetooth device
-                ps_bat = (
-                    "Get-PnpDevice -Class Bluetooth -Status OK 2>$null | "
-                    "ForEach-Object {"
-                    "  $n=$_.FriendlyName; "
-                    "  $reg='HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\'+$_.InstanceId;"
-                    "  $b=(Get-ItemProperty -Path $reg -Name BatteryLevel "
-                    "       -ErrorAction SilentlyContinue).BatteryLevel;"
-                    "  if($b -ne $null){"
-                    "    [PSCustomObject]@{Name=$n;Bat=[int]$b}"
-                    "  }"
-                    "} | ConvertTo-Csv -NoTypeInformation"
-                )
-                r_bat = subprocess.run(
-                    ["powershell","-NoProfile","-Command", ps_bat],
-                    capture_output=True, text=True, timeout=8)
-                for line in r_bat.stdout.splitlines()[1:]:
-                    parts = line.strip().split('","')
-                    if len(parts) < 2: continue
-                    bname = parts[0].strip('"').strip()
-                    bval  = parts[1].strip('"').strip().rstrip('"')
-                    if not bval.lstrip('-').isdigit(): continue
-                    bint  = int(bval)
-                    if not (0 <= bint <= 100): continue
-                    bkey  = " ".join(bname.lower().split()[:2])
-                    if bkey in bt_names:
-                        bt_names[bkey]["battery"] = bint
-            except Exception: pass
+            # ── Step 2: battery — three methods, first one wins ────────────
+            if bt_names:
+                # Method A: DEVPKEY {104EA319} 2  (GATT battery, Win10 1903+)
+                try:
+                    ps_batA = (
+                        "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue |"
+                        " ForEach-Object {"
+                        "  $b=(Get-PnpDeviceProperty -InstanceId $_.InstanceId"
+                        "   -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2'"
+                        "   -ErrorAction SilentlyContinue).Data;"
+                        "  if($b -ne $null -and $b -ge 0 -and $b -le 100){"
+                        "    Write-Output ($_.FriendlyName+'|'+[int]$b)"
+                        "  }"
+                        "}"
+                    )
+                    r_a = subprocess.run(
+                        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_batA],
+                        capture_output=True, text=True, timeout=10)
+                    for line in r_a.stdout.strip().splitlines():
+                        line = line.strip()
+                        if "|" not in line: continue
+                        bname, bval = line.rsplit("|", 1)
+                        bval = bval.strip()
+                        if not bval.isdigit(): continue
+                        bkey = " ".join(bname.strip().lower().split()[:2])
+                        if bkey in bt_names and bt_names[bkey]["battery"] is None:
+                            bt_names[bkey]["battery"] = int(bval)
+                except Exception: pass
 
-            # ── USB / external devices (NOT built-in, NOT BT duplicates) ──
+                # Method B: Registry BatteryLevel key
+                try:
+                    ps_batB = (
+                        "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue |"
+                        " ForEach-Object {"
+                        "  $reg='HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\'+$_.InstanceId;"
+                        "  $b=(Get-ItemProperty -Path $reg -Name BatteryLevel"
+                        "   -ErrorAction SilentlyContinue).BatteryLevel;"
+                        "  if($b -ne $null -and $b -ge 0 -and $b -le 100){"
+                        "    Write-Output ($_.FriendlyName+'|'+[int]$b)"
+                        "  }"
+                        "}"
+                    )
+                    r_b = subprocess.run(
+                        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_batB],
+                        capture_output=True, text=True, timeout=10)
+                    for line in r_b.stdout.strip().splitlines():
+                        line = line.strip()
+                        if "|" not in line: continue
+                        bname, bval = line.rsplit("|", 1)
+                        bval = bval.strip()
+                        if not bval.isdigit(): continue
+                        bkey = " ".join(bname.strip().lower().split()[:2])
+                        if bkey in bt_names and bt_names[bkey]["battery"] is None:
+                            bt_names[bkey]["battery"] = int(bval)
+                except Exception: pass
+
+                # Method C: WMI Win32_Battery (paired devices that expose it)
+                try:
+                    ps_batC = (
+                        "Get-WmiObject Win32_Battery -ErrorAction SilentlyContinue |"
+                        " Select-Object Name,EstimatedChargeRemaining |"
+                        " ForEach-Object {"
+                        "  if($_.EstimatedChargeRemaining -ne $null){"
+                        "    Write-Output ($_.Name+'|'+[int]$_.EstimatedChargeRemaining)"
+                        "  }"
+                        "}"
+                    )
+                    r_c = subprocess.run(
+                        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_batC],
+                        capture_output=True, text=True, timeout=8)
+                    for line in r_c.stdout.strip().splitlines():
+                        line = line.strip()
+                        if "|" not in line: continue
+                        bname, bval = line.rsplit("|", 1)
+                        bval = bval.strip()
+                        if not bval.isdigit(): continue
+                        bkey = " ".join(bname.strip().lower().split()[:2])
+                        if bkey in bt_names and bt_names[bkey]["battery"] is None:
+                            bt_names[bkey]["battery"] = int(bval)
+                except Exception: pass
+
+            # Strip internal _iid field before storing
+            for d in devs:
+                d.pop("_iid", None)
+
+            # ── Step 3: USB / WPD / gamepad devices ───────────────────────
             try:
-                ps2 = (
-                    "Get-WmiObject Win32_PnPEntity | "
-                    "Where-Object {"
-                    "  $_.PNPClass -in @('WPD','DiskDrive','CDROM') -or "
-                    "  ($_.PNPClass -eq 'HIDClass' -and "
-                    "   $_.Name -match 'Xbox|Controller|Gamepad|Joystick') -or "
-                    "  ($_.PNPClass -eq 'USB' -and "
-                    "   $_.Name -notmatch 'Hub|Root|Host|Composite|Unknown|Microsoft|Intel')"
-                    "} | Select-Object Name,PNPClass | ConvertTo-Csv -NoTypeInformation"
+                ps_usb = (
+                    "Get-WmiObject Win32_PnPEntity -ErrorAction SilentlyContinue |"
+                    " Where-Object {"
+                    "  $_.PNPClass -in @('WPD','DiskDrive') -or"
+                    "  ($_.PNPClass -eq 'HIDClass' -and $_.Name -match 'Xbox|Controller|Gamepad') -or"
+                    "  ($_.PNPClass -eq 'USB' -and $_.Present -eq $true -and"
+                    "   $_.Name -notmatch 'Hub|Root|Host|Composite|Unknown|Microsoft|Intel|Realtek')"
+                    "} | ForEach-Object { Write-Output ($_.Name+'|'+$_.PNPClass) }"
                 )
-                r2 = subprocess.run(["powershell","-NoProfile","-Command", ps2],
-                                    capture_output=True, text=True, timeout=8)
-                for line in r2.stdout.splitlines()[1:]:
-                    parts = line.strip().split('","')
-                    if len(parts) < 2: continue
-                    name = parts[0].strip('"').strip()
-                    cls  = parts[1].strip('"').strip().rstrip('"')
+                r_usb = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_usb],
+                    capture_output=True, text=True, timeout=10)
+                for line in r_usb.stdout.strip().splitlines():
+                    line = line.strip()
+                    if not line or "|" not in line: continue
+                    name, cls = line.rsplit("|", 1)
+                    name = name.strip(); cls = cls.strip()
                     if not name: continue
                     nl = name.lower()
-                    # skip junk and anything already added via BT
-                    if any(x in nl for x in _JUNK):    continue
-                    if any(x in nl for x in _BT_SVC):  continue
+                    if any(x in nl for x in _JUNK): continue
+                    if any(x in nl for x in _SKIP): continue
                     key = " ".join(nl.split()[:2])
                     if key in seen_names: continue
                     seen_names.add(key)
-                    # classify
                     if any(x in nl for x in ("xbox","controller","gamepad","joystick")):
                         dtype = "CTRL"
                     elif any(x in nl for x in ("phone","android","iphone","mobile","adb")):
@@ -1165,7 +1379,7 @@ class SysData:
                         dtype = "MOUSE"
                     elif any(x in nl for x in ("keyboard","kbd")):
                         dtype = "KBD"
-                    elif cls in ("WPD",):
+                    elif cls == "WPD":
                         dtype = "MTP"
                     else:
                         dtype = "USB"
@@ -1262,10 +1476,18 @@ class SysData:
             except: pass
             try: self.uptime = int(time.time()-self._boot)
             except: pass
-        # Scan devices every 5 seconds (slow operation)
-        if time.time() - self._dev_last > 5:
-            self._dev_last = time.time()
-            self.devices = self._scan_devices()
+        # Scan devices every 8 seconds in background thread (slow PS calls)
+        if time.time() - self._dev_last > 8 and not self._dev_scanning:
+            self._dev_last     = time.time()
+            self._dev_scanning = True
+            def _bg_scan(self=self):
+                try:
+                    result = self._scan_devices()
+                    with self._lock:
+                        self.devices = result
+                finally:
+                    self._dev_scanning = False
+            threading.Thread(target=_bg_scan, daemon=True).start()
 
     def snap(self):
         with self._lock:
@@ -1368,7 +1590,7 @@ def draw_spectrum(win, y, x, h, w, spectrum, col_low=P_CYAN, col_mid=P_BLUE, col
 # ══════════════════════════════════════════════════════════════════════════════
 #  APP STATE
 # ══════════════════════════════════════════════════════════════════════════════
-VIEWS = ["DASHBOARD","CLOCK + MUSIC","FOCUS","NEOFETCH","NETWORK","LIBRARY"]
+VIEWS = ["DASHBOARD","CLOCK + MUSIC","FOCUS","NEOFETCH","NETWORK","LIBRARY","CALENDAR"]
 
 class State:
     def __init__(self):
@@ -1386,8 +1608,11 @@ class State:
         self._pw        = time.time()
         self.focus_modes= ["DEEP WORK","READING","CODING","REVIEW","WRITING"]
         self.focus_idx  = 0
-        # events
-        self.events = [(16,0,"Dev Standup"),(18,30,"Team Retro"),(21,0,"Gym session")]
+        # calendar view state
+        self.cal_mode  = "week"   # day | week | month
+        self.cal_date  = datetime.datetime.now().date()  # currently viewed date
+        self.cal_add   = False
+        self.cal_buf   = ""   # typing buffer for add-event
         # spectrum smoothing
         self._spec_smooth = [0.0]*32
 
@@ -1425,14 +1650,7 @@ def tick():
 #  SHARED: next event helper
 # ══════════════════════════════════════════════════════════════════════════════
 def next_event():
-    now = datetime.datetime.now()
-    for h,m,name in ST.events:
-        ev = now.replace(hour=h,minute=m,second=0,microsecond=0)
-        if ev > now:
-            diff = int((ev-now).total_seconds())
-            hh,rem = divmod(diff,3600); mm=rem//60
-            return f"{h:02d}:{m:02d}  {name}", f"in {hh}h {mm:02d}m"
-    return "No more events", "tomorrow →"
+    return get_next_event()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  VIEW 1 — DASHBOARD
@@ -2037,6 +2255,451 @@ def _text_input(buf, k):
 # The user should right-click → Paste in their terminal emulator.
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIEW 7 — CALENDAR  (day / week / month  ·  Google Cal & Apple Cal via ICS)
+# ══════════════════════════════════════════════════════════════════════════════
+class CalState:
+    mode      = "week"    # "day" | "week" | "month"
+    date      = datetime.datetime.now().date()
+    # ── add-event form (step-by-step) ──
+    add_mode  = False
+    add_step  = 0         # 0=date  1=time  2=title
+    add_date  = None      # datetime.date
+    add_hour  = 9
+    add_min   = 0
+    add_title = ""
+    # ── delete mode ──
+    del_mode  = False     # confirm-delete overlay open
+    del_idx   = -1        # index into local_evs to delete
+    cur_ev    = 0         # currently selected event index (in day view)
+    # ── ICS sync ──
+    ics_mode  = False
+    ics_buf   = ""
+    # ── status ──
+    msg       = ""
+    msg_time  = 0.0
+    local_evs = []        # list of {"dt": "YYYY-MM-DD HH:MM", "title": "..."}
+
+CS = CalState()
+# Load local events
+try:
+    with open(CAL_FILE) as _f:
+        CS.local_evs = json.load(_f)
+except Exception:
+    CS.local_evs = []
+
+
+def _evs_for_day(d):
+    """Return events for date d as list of (start_dt, end_dt, title)."""
+    with _CAL_LOCK:
+        evs = list(_CAL_EVENTS)
+    return [(s, e, t) for s, e, t in evs if s.date() == d]
+
+
+def _evs_for_week(d):
+    """Return events for the ISO week containing d."""
+    monday = d - datetime.timedelta(days=d.weekday())
+    week   = [monday + datetime.timedelta(days=i) for i in range(7)]
+    with _CAL_LOCK:
+        evs = list(_CAL_EVENTS)
+    result = {day: [] for day in week}
+    for s, e, t in evs:
+        if s.date() in result:
+            result[s.date()].append((s, t))
+    return week, result
+
+
+def _evs_for_month(d):
+    """Return (grid of weeks, events dict) for the month of d."""
+    import calendar as _cal
+    first = d.replace(day=1)
+    days_in = _cal.monthrange(d.year, d.month)[1]
+    all_days = [first + datetime.timedelta(days=i) for i in range(days_in)]
+    # Pad to full weeks
+    start_pad = first.weekday()   # Mon=0
+    end_pad   = (7 - (days_in + start_pad) % 7) % 7
+    grid = ([None]*start_pad + all_days +
+            [first + datetime.timedelta(days=days_in+i) for i in range(end_pad)])
+    weeks = [grid[i:i+7] for i in range(0, len(grid), 7)]
+    with _CAL_LOCK:
+        evs = list(_CAL_EVENTS)
+    ev_map = {}
+    for s, e, t in evs:
+        if s.year == d.year and s.month == d.month:
+            ev_map.setdefault(s.date(), []).append(t)
+    return weeks, ev_map
+
+
+def v_calendar(win, W, H):
+    now   = datetime.datetime.now()
+    today = now.date()
+
+    if CS.msg and time.time() - CS.msg_time > 4:
+        CS.msg = ""
+
+    # ── Minimal header ────────────────────────────────────────────────────
+    #   MARCH 2026              day  week  month
+    month_s = CS.date.strftime("%B %Y").upper()
+    put(win, 0, 2, month_s, cp(P_HI, bold=True))
+
+    # Mode tabs — highlight active
+    tabs = [("day","1"), ("week","2"), ("month","3")]
+    tx = W - 28
+    for name, key in tabs:
+        active = (CS.mode == name)
+        lbl = f" {name.upper()} "
+        col = cp(P_CYAN, bold=True) if active else cp(P_DIM)
+        attr = col | (curses.A_UNDERLINE if active else 0)
+        put(win, 0, tx, lbl, attr)
+        tx += len(lbl) + 1
+
+    # Thin separator
+    put(win, 1, 0, "─"*W, cp(P_BOX))
+
+    # Bottom hint — single clean line
+    hint = " j/k · nav    a · add    d · delete    G · sync    t · today    1/2/3 · day/week/month "
+    if CS.msg:
+        hcol = P_RED if "ERROR" in CS.msg else P_GREEN
+        put(win, H-1, 0, (" " + CS.msg)[:W], cp(hcol, bold=True))
+    else:
+        put(win, H-1, 0, hint[:W], cp(P_DIM))
+
+    CY = 2          # content start row
+    CH = H - 3      # content height
+
+    # ── Input overlays ───────────────────────────────────────────────────
+    if CS.add_mode or CS.ics_mode or CS.del_mode:
+        blink = "▌" if int(time.time()*2)%2 else " "
+        ow = min(W-8, 58); ox = (W-ow)//2; oy = H//2 - 5
+
+        for r in range(oy, oy+11):
+            try: win.move(r, ox); win.clrtoeol()
+            except: pass
+
+        # ── ADD EVENT — 3-field form ──────────────────────────────────────
+        if CS.add_mode:
+            step = CS.add_step
+            put(win, oy,   ox+2, "new event", cp(P_CYAN, bold=True))
+            put(win, oy+1, ox+2, "─"*(ow-4),  cp(P_BOX))
+
+            # Field 1: DATE
+            d_str = CS.add_date.strftime("%Y-%m-%d") if CS.add_date else CS.date.strftime("%Y-%m-%d")
+            f1_attr = (cp(P_AMBER, bold=True) | curses.A_UNDERLINE) if step==0 else cp(P_MID)
+            put(win, oy+3, ox+4, "date   ", cp(P_DIM))
+            put(win, oy+3, ox+11, d_str, f1_attr)
+            if step==0: put(win, oy+3, ox+19, "  ← → day  shift+←→ month  enter→next", cp(P_DIM))
+
+            # Field 2: TIME
+            t_str = f"{CS.add_hour:02d}:{CS.add_min:02d}"
+            f2_attr = (cp(P_AMBER, bold=True) | curses.A_UNDERLINE) if step==1 else cp(P_MID)
+            put(win, oy+5, ox+4, "time   ", cp(P_DIM))
+            put(win, oy+5, ox+11, t_str, f2_attr)
+            if step==1: put(win, oy+5, ox+17, "  ↑↓ hour  ← → minute  enter→next", cp(P_DIM))
+
+            # Field 3: TITLE
+            t_buf  = CS.add_title
+            f3_attr = (cp(P_HI, bold=True)) if step==2 else cp(P_MID)
+            put(win, oy+7, ox+4, "title  ", cp(P_DIM))
+            if step==2:
+                put(win, oy+7, ox+11, f"{t_buf}{blink}", f3_attr)
+            else:
+                put(win, oy+7, ox+11, t_buf if t_buf else "─", f3_attr)
+
+            put(win, oy+9, ox+2, "─"*(ow-4), cp(P_BOX))
+            if step==2:
+                put(win, oy+10, ox+4, "enter · save", cp(P_GREEN))
+            else:
+                put(win, oy+10, ox+4, "enter · next field", cp(P_DIM))
+            put(win, oy+10, ox+22, "esc · cancel", cp(P_DIM))
+
+        # ── ICS SYNC ──────────────────────────────────────────────────────
+        elif CS.ics_mode:
+            put(win, oy,   ox+2, "connect calendar", cp(P_CYAN, bold=True))
+            put(win, oy+1, ox+2, "─"*(ow-4),         cp(P_BOX))
+            put(win, oy+3, ox+2, "Google Cal: Settings → Secret address in iCal format", cp(P_DIM))
+            put(win, oy+4, ox+2, "Apple Cal:  File → Export → save to ~/.terminal_standby.ics", cp(P_DIM))
+            put(win, oy+6, ox+4, f"{CS.ics_buf}{blink}", cp(P_HI, bold=True))
+            put(win, oy+8, ox+2, "─"*(ow-4),         cp(P_BOX))
+            put(win, oy+9, ox+4, "enter · sync    esc · cancel", cp(P_DIM))
+
+        # ── DELETE CONFIRM ────────────────────────────────────────────────
+        elif CS.del_mode:
+            ev = CS.local_evs[CS.del_idx] if 0 <= CS.del_idx < len(CS.local_evs) else None
+            put(win, oy,   ox+2, "delete event", cp(P_RED, bold=True))
+            put(win, oy+1, ox+2, "─"*(ow-4),    cp(P_BOX))
+            if ev:
+                put(win, oy+3, ox+4, ev.get("title","?")[:ow-6], cp(P_HI))
+                put(win, oy+4, ox+4, ev.get("dt","")[:ow-6],     cp(P_DIM))
+            put(win, oy+6, ox+2, "─"*(ow-4), cp(P_BOX))
+            put(win, oy+7, ox+4, "y · confirm delete    n / esc · cancel", cp(P_DIM))
+        return
+
+    # ─────────────────────────────────────────────────────────────────────
+    # DAY VIEW  — clean hour timeline
+    # ─────────────────────────────────────────────────────────────────────
+    if CS.mode == "day":
+        evs      = _evs_for_day(CS.date)
+        is_today = (CS.date == today)
+
+        # Date label
+        if is_today:
+            dlbl = f"  today  ·  {CS.date.strftime('%A, %d %B')}"
+            put(win, CY, 0, dlbl, cp(P_AMBER, bold=True))
+        else:
+            dlbl = f"  {CS.date.strftime('%A, %d %B %Y')}"
+            put(win, CY, 0, dlbl, cp(P_MID))
+
+        # Hour slot height: try to show 7am-10pm in available rows
+        FIRST_H, LAST_H = 7, 22
+        n_hours  = LAST_H - FIRST_H + 1
+        slot_h   = max(1, (CH - 2) // n_hours)
+        time_col = 2
+        ev_col   = 9
+
+        for hi, hour in enumerate(range(FIRST_H, LAST_H+1)):
+            hy = CY + 2 + hi * slot_h
+            if hy >= CY + CH: break
+
+            is_now = is_today and now.hour == hour
+            # Hour label
+            if slot_h > 1 or (hour % 2 == 0):          # skip odd hours if tight
+                hcol = P_AMBER if is_now else P_DIM
+                put(win, hy, time_col, f"{hour:02d}", cp(hcol))
+
+            # Current-time indicator
+            if is_now:
+                put(win, hy, ev_col-1, "▶", cp(P_AMBER, bold=True))
+
+            # Hairline
+            put(win, hy, ev_col, "·"*2, cp(P_BOX))
+
+            # Events
+            hour_evs = [(s,e,t) for s,e,t in evs if s.hour == hour]
+            for ei, (s, e, t) in enumerate(hour_evs):
+                ey = hy + ei
+                if ey >= CY + CH: break
+                # global event index across all hours
+                g_idx = evs.index((s,e,t))
+                sel   = (g_idx == CS.cur_ev)
+                upcoming = s >= now
+                ecol  = P_AMBER if sel else (P_CYAN if upcoming else P_DIM)
+                mins  = f":{s.minute:02d}" if s.minute else "   "
+                # mark local-only events with ● so user knows they can delete them
+                is_local = any(
+                    lev.get("title") == t and
+                    lev.get("dt","").startswith(s.strftime("%Y-%m-%d"))
+                    for lev in CS.local_evs
+                )
+                marker = "●" if is_local else "○"
+                row_txt = f" {marker} {mins}  {t}"[:W-ev_col-3]
+                put(win, ey, ev_col+2, row_txt, cp(ecol, bold=(sel or upcoming)))
+                if sel:
+                    put(win, ey, ev_col, "▶", cp(P_AMBER, bold=True))
+
+        if not evs:
+            put(win, CY+CH//2,   0, " "*W, 0)
+            centre(win, CY+CH//2,   "nothing scheduled", cp(P_DIM))
+            centre(win, CY+CH//2+1, "press a to add an event", cp(P_DIM))
+
+    # ─────────────────────────────────────────────────────────────────────
+    # WEEK VIEW  — 7 columns, events stacked per day
+    # ─────────────────────────────────────────────────────────────────────
+    elif CS.mode == "week":
+        week, ev_map = _evs_for_week(CS.date)
+        col_w = (W - 1) // 7
+
+        # Day headers
+        for i, d in enumerate(week):
+            x    = 1 + i * col_w
+            is_t = (d == today)
+            name = d.strftime("%a").upper()
+            num  = str(d.day)
+            if is_t:
+                # Underline today's number
+                put(win, CY,   x, name, cp(P_DIM))
+                put(win, CY+1, x, num,  cp(P_AMBER, bold=True))
+                put(win, CY+2, x, "──", cp(P_AMBER))
+            else:
+                put(win, CY,   x, name, cp(P_DIM))
+                put(win, CY+1, x, num,  cp(P_MID))
+
+        # Vertical column dividers
+        for i in range(1, 7):
+            x = i * col_w
+            for r in range(CY, CY+CH):
+                try: win.addch(r, x, curses.ACS_VLINE, cp(P_BOX))
+                except: pass
+
+        # Events per column
+        ev_start_y = CY + 3
+        max_ev_rows = CH - 3
+        for i, d in enumerate(week):
+            x    = 1 + i * col_w
+            devs = ev_map.get(d, [])
+            is_t = (d == today)
+            for ri, (s, t) in enumerate(devs[:max_ev_rows]):
+                ry      = ev_start_y + ri
+                if ry >= CY + CH: break
+                upcoming = s.date() >= today
+                if is_t and upcoming:
+                    ecol = P_CYAN
+                elif upcoming:
+                    ecol = P_MID
+                else:
+                    ecol = P_DIM
+                # time + title clipped to column width
+                txt = f"{s.strftime('%H:%M')} {t}"
+                put(win, ry, x, txt[:col_w-1], cp(ecol))
+
+    # ─────────────────────────────────────────────────────────────────────
+    # MONTH VIEW  — clean grid, event dots + first title
+    # ─────────────────────────────────────────────────────────────────────
+    elif CS.mode == "month":
+        weeks, ev_map = _evs_for_month(CS.date)
+        col_w      = (W - 1) // 7
+        row_h      = max(2, (CH - 2) // max(1, len(weeks)))
+        day_names  = ["MON","TUE","WED","THU","FRI","SAT","SUN"]
+
+        # Weekday header
+        for i, dn in enumerate(day_names):
+            is_wknd = i >= 5
+            put(win, CY, 1+i*col_w, dn, cp(P_DIM if not is_wknd else P_BOX))
+        put(win, CY+1, 0, "─"*W, cp(P_BOX))
+
+        for wi, week in enumerate(weeks):
+            wy = CY + 2 + wi * row_h
+            for di, d in enumerate(week):
+                x = 1 + di * col_w
+                if d is None:
+                    continue
+                is_t   = (d == today)
+                is_sel = (d == CS.date)
+                evs    = ev_map.get(d, [])
+                n_ev   = len(evs)
+
+                # Day number styling
+                num = str(d.day)
+                if is_t:
+                    # Today: number + underline accent
+                    put(win, wy, x, num, cp(P_AMBER, bold=True))
+                    put(win, wy, x+len(num), "▾", cp(P_AMBER))
+                elif is_sel:
+                    put(win, wy, x, num, cp(P_CYAN, bold=True))
+                elif di >= 5:  # weekend
+                    put(win, wy, x, num, cp(P_BOX))
+                else:
+                    put(win, wy, x, num, cp(P_MID))
+
+                # Event indicators
+                if n_ev and row_h >= 2:
+                    # Coloured dot count then first title clipped
+                    dot_c = P_GREEN if d >= today else P_DIM
+                    dots  = "·" * min(n_ev, col_w-4)
+                    put(win, wy+1, x, dots[:col_w-2], cp(dot_c))
+                    if row_h >= 3 and evs:
+                        put(win, wy+2, x, evs[0][:col_w-1], cp(P_DIM))
+
+    # ── No calendar notice ────────────────────────────────────────────────
+    with _CAL_LOCK:
+        n_total = len(_CAL_EVENTS)
+    if n_total == 0 and not CS.add_mode and not CS.ics_mode:
+        centre(win, H-2,
+               "no events · press G to connect Google or Apple Calendar",
+               cp(P_DIM))
+
+
+def _handle_cal_input(k):
+    """Handle all calendar overlay key input (add form, delete confirm, ICS)."""
+    # ── ADD FORM ──────────────────────────────────────────────────────────
+    if CS.add_mode:
+        step = CS.add_step
+
+        if step == 0:   # DATE field  — arrow keys change day/month
+            if k in (10, 13):
+                CS.add_step = 1
+            elif k == 27:
+                CS.add_mode = False
+            elif k == curses.KEY_RIGHT:
+                CS.add_date = CS.add_date + datetime.timedelta(days=1)
+            elif k == curses.KEY_LEFT:
+                CS.add_date = CS.add_date - datetime.timedelta(days=1)
+            elif k == curses.KEY_SR or k == 337:   # Shift+Up → +1 month
+                import calendar as _c
+                y, m = CS.add_date.year, CS.add_date.month
+                m += 1
+                if m > 12: m, y = 1, y+1
+                d = min(CS.add_date.day, _c.monthrange(y,m)[1])
+                CS.add_date = CS.add_date.replace(year=y, month=m, day=d)
+            elif k == curses.KEY_SF or k == 336:   # Shift+Down → -1 month
+                import calendar as _c
+                y, m = CS.add_date.year, CS.add_date.month
+                m -= 1
+                if m < 1: m, y = 12, y-1
+                d = min(CS.add_date.day, _c.monthrange(y,m)[1])
+                CS.add_date = CS.add_date.replace(year=y, month=m, day=d)
+
+        elif step == 1:  # TIME field  — up/down = hour, left/right = minute
+            if k in (10, 13):
+                CS.add_step = 2
+            elif k == 27:
+                CS.add_mode = False
+            elif k in (curses.KEY_UP, ord('k')):
+                CS.add_hour = (CS.add_hour + 1) % 24
+            elif k in (curses.KEY_DOWN, ord('j')):
+                CS.add_hour = (CS.add_hour - 1) % 24
+            elif k == curses.KEY_RIGHT:
+                CS.add_min = (CS.add_min + 5) % 60
+            elif k == curses.KEY_LEFT:
+                CS.add_min = (CS.add_min - 5) % 60
+
+        elif step == 2:  # TITLE field  — free text
+            if k in (10, 13):
+                title = CS.add_title.strip() or "Event"
+                dt_str = f"{CS.add_date.strftime('%Y-%m-%d')} {CS.add_hour:02d}:{CS.add_min:02d}"
+                CS.local_evs.append({"dt": dt_str, "title": title})
+                save_local_events(CS.local_evs)
+                threading.Thread(target=refresh_calendar, daemon=True).start()
+                CS.msg = f"Added: {title}"; CS.msg_time = time.time()
+                CS.add_mode = False
+            elif k == 27:
+                CS.add_mode = False
+            elif k in (curses.KEY_BACKSPACE, 127, 8):
+                CS.add_title = CS.add_title[:-1]
+            elif 32 <= k <= 126:
+                CS.add_title += chr(k)
+
+    # ── DELETE CONFIRM ────────────────────────────────────────────────────
+    elif CS.del_mode:
+        if k in (ord('y'), ord('Y')):
+            if 0 <= CS.del_idx < len(CS.local_evs):
+                title = CS.local_evs[CS.del_idx].get("title","Event")
+                CS.local_evs.pop(CS.del_idx)
+                save_local_events(CS.local_evs)
+                threading.Thread(target=refresh_calendar, daemon=True).start()
+                CS.msg = f"Deleted: {title}"; CS.msg_time = time.time()
+                CS.cur_ev = max(0, CS.cur_ev - 1)
+            CS.del_mode = False; CS.del_idx = -1
+        elif k in (ord('n'), ord('N'), 27):
+            CS.del_mode = False; CS.del_idx = -1
+
+    # ── ICS SYNC ─────────────────────────────────────────────────────────
+    elif CS.ics_mode:
+        if k in (10, 13):
+            url = CS.ics_buf.strip()
+            if url:
+                def _sync(u=url):
+                    ok, msg = fetch_ics_url(u)
+                    CS.msg = msg; CS.msg_time = time.time()
+                threading.Thread(target=_sync, daemon=True).start()
+            CS.ics_mode = False; CS.ics_buf = ""
+        elif k == 27:
+            CS.ics_mode = False; CS.ics_buf = ""
+        elif k in (curses.KEY_BACKSPACE, 127, 8):
+            CS.ics_buf = CS.ics_buf[:-1]
+        elif 32 <= k <= 126:
+            CS.ics_buf += chr(k)
+
+
 def handle_key(k):
     v = ST.view
 
@@ -2057,6 +2720,11 @@ def handle_key(k):
         else:
             ST.todo_buf = _text_input(ST.todo_buf, k)
         return  # swallow everything while typing
+
+    # Calendar input modes — consume ALL keys before global nav
+    if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode):
+        _handle_cal_input(k)
+        return
 
     # Library text input mode — must check BEFORE global nav
     if v == 5 and LS.mode in ("add_url", "add_file"):
@@ -2143,10 +2811,70 @@ def handle_key(k):
             elif k in (ord('n'), ord('N'), 27):
                 LS.mode = "browse"
 
+    elif v == 6:  # calendar navigation (input modes handled above)
+        if k == ord('1'):   CS.mode = "day"
+        elif k == ord('2'): CS.mode = "week"
+        elif k == ord('3'): CS.mode = "month"
+        elif k in (ord('j'), curses.KEY_DOWN):
+            if CS.mode == "day":
+                # Move event cursor in day view if events exist
+                evs = _evs_for_day(CS.date)
+                if evs:
+                    CS.cur_ev = (CS.cur_ev + 1) % len(evs)
+                else:
+                    CS.date += datetime.timedelta(days=1)
+            else:
+                step = 7 if CS.mode=="week" else 28
+                CS.date += datetime.timedelta(days=step)
+        elif k in (ord('k'), curses.KEY_UP):
+            if CS.mode == "day":
+                evs = _evs_for_day(CS.date)
+                if evs:
+                    CS.cur_ev = (CS.cur_ev - 1) % len(evs)
+                else:
+                    CS.date -= datetime.timedelta(days=1)
+            else:
+                step = 7 if CS.mode=="week" else 28
+                CS.date -= datetime.timedelta(days=step)
+        elif k in (curses.KEY_RIGHT, curses.KEY_LEFT) and CS.mode != "day":
+            # left/right navigate days in week/month view
+            CS.date += datetime.timedelta(days=1 if k==curses.KEY_RIGHT else -1)
+        elif k == ord('t'):
+            CS.date  = datetime.datetime.now().date()
+            CS.cur_ev = 0
+        elif k == ord('a'):
+            # Open structured add form
+            CS.add_mode  = True
+            CS.add_step  = 0
+            CS.add_date  = CS.date
+            CS.add_hour  = 9
+            CS.add_min   = 0
+            CS.add_title = ""
+        elif k == ord('d'):
+            # Delete: only local events, cursor must be on one
+            evs = _evs_for_day(CS.date)
+            if evs and 0 <= CS.cur_ev < len(evs):
+                s, e, t = evs[CS.cur_ev]
+                # find matching local event
+                for li, lev in enumerate(CS.local_evs):
+                    if (lev.get("title") == t and
+                            lev.get("dt","").startswith(s.strftime("%Y-%m-%d"))):
+                        CS.del_idx  = li
+                        CS.del_mode = True
+                        break
+                else:
+                    CS.msg      = "ICS events cannot be deleted here"
+                    CS.msg_time = time.time()
+        elif k == ord('G'):
+            CS.ics_mode = True; CS.ics_buf = ""
+        elif k == ord('r'):
+            threading.Thread(target=refresh_calendar, daemon=True).start()
+            CS.msg = "Refreshing..."; CS.msg_time = time.time()
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
-VIEW_FNS=[v_dashboard,v_clock,v_focus,v_neofetch,v_network,v_library]
+VIEW_FNS=[v_dashboard,v_clock,v_focus,v_neofetch,v_network,v_library,v_calendar]
 
 def main(stdscr):
     curses.curs_set(0)
