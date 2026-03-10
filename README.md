@@ -1,9 +1,9 @@
 # 🖥️ Terminal StandBy
 
-> An Apple-style standby mode for your terminal — ambient music, live spectrum visualizer, system stats, focus tools, and real device monitoring. All in one beautiful TUI.
+> An Apple-style standby mode for your terminal — ambient music, live spectrum visualizer, system stats, focus tools, real device monitoring, and a full calendar. All in one beautiful TUI.
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)
-![Version](https://img.shields.io/badge/Version-v3-blueviolet)
+![Version](https://img.shields.io/badge/Version-v4-blueviolet)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -20,7 +20,7 @@
   - 🌌 **Deep Space Hum** — low-frequency drone for meditation
 - **Custom track support** — add local audio files or YouTube URLs via `yt-dlp`
 - **Shuffle, Repeat, Prev/Next** controls available from every view
-- **Smart backend detection** — now prefers `sounddevice` (gapless, zero subprocess) with auto-install on first run, falls back to `ffplay`, `afplay`, `mpv`, `aplay`, or `winsound`
+- **Smart backend detection** — prefers `sounddevice` (gapless, zero subprocess) with auto-install on first run, falls back to `ffplay`, `afplay`, `mpv`, `aplay`, or `winsound`
 
 ### 📊 Views (navigate with `←` / `→`)
 
@@ -32,10 +32,21 @@
 | 4 | **Neofetch** | System info panel — OS, CPU, GPU, RAM, uptime, and more |
 | 5 | **Network** | Live bandwidth stats, real connected device list with battery % |
 | 6 | **Library** | Browse, add, and manage your music library |
+| 7 | **Calendar** ⭐ new | Day, Week, and Month views with Google & Apple Calendar sync |
 
-### 📡 Real Device Monitoring (v3)
-The Network view now scans and displays **actually connected** devices — not built-in or virtual ones:
-- **Bluetooth** — AirPods, keyboards, mice, phones (with battery % where available via GATT)
+### 🗓️ Calendar View (new in v4)
+A full calendar built into the terminal:
+- **Three view modes** — Day, Week, and Month, toggled with `1` / `2` / `3`
+- **Google Calendar sync** — paste your secret ICS URL and hit `G` to sync
+- **Apple Calendar sync** — export your `.ics` file to `~/.terminal_standby.ics`
+- **Add events manually** — step-through form for date, time, and title
+- **Delete events** — remove local events with a confirmation prompt
+- **Today indicator** — current hour highlighted with a live `▶` marker in Day view
+- Events are colour-coded: upcoming in cyan, selected in amber, past events dimmed
+
+### 📡 Real Device Monitoring
+The Network view scans and displays **actually connected** devices — not built-in or virtual ones:
+- **Bluetooth** — AirPods, keyboards, mice, phones (with battery % via GATT where available)
 - **USB** — external drives, hubs, USB-C docks (labelled `[USB]` / `[USB-C]`)
 - **Controllers** — Xbox, PlayStation, and generic gamepads (`[CTRL]`)
 - **Phones** — Android (ADB) and iPhone detected as `[PHONE]`
@@ -90,6 +101,23 @@ python main.py
 
 ---
 
+## 🗓️ Setting Up Calendar Sync
+
+### Google Calendar
+1. Open Google Calendar → **Settings** → select your calendar
+2. Scroll to **Secret address in iCal format** and copy the URL
+3. In Terminal StandBy, navigate to the **Calendar** view
+4. Press `G` and paste the URL, then press `Enter` to sync
+
+### Apple Calendar
+1. Open Apple Calendar → **File → Export…**
+2. Save the `.ics` file to `~/.terminal_standby.ics`
+3. Navigate to the **Calendar** view and press `G` to load it
+
+Events sync on demand — press `G` at any time to refresh.
+
+---
+
 ## 🎮 Controls
 
 ### Global (works in every view)
@@ -123,6 +151,16 @@ python main.py
 | `s` | Switch Work ↔ Break |
 | `f` | Cycle focus mode |
 
+### Calendar View
+| Key | Action |
+|-----|--------|
+| `1` / `2` / `3` | Switch Day / Week / Month view |
+| `j` / `k` | Navigate events or days |
+| `a` | Add a new event |
+| `d` | Delete selected event |
+| `G` | Sync from Google / Apple Calendar (ICS) |
+| `t` | Jump to today |
+
 ### Library View
 | Key | Action |
 |-----|--------|
@@ -138,9 +176,11 @@ python main.py
 
 ```
 terminal-standby/
-├── main.py                          # Main application (single-file)
-└── ~/.terminal_standby_music.json   # Saved user library (auto-created)
-└── ~/.terminal_standby_cache/       # Downloaded YouTube audio cache
+├── main.py                            # Main application (single-file)
+├── ~/.terminal_standby_music.json     # Saved music library (auto-created)
+├── ~/.terminal_standby_cache/         # Downloaded YouTube audio cache
+├── ~/.terminal_standby.ics            # Apple/Google Calendar ICS file
+└── ~/.terminal_standby_events.json    # Manually added local events
 ```
 
 ---
@@ -149,7 +189,7 @@ terminal-standby/
 
 Terminal StandBy auto-detects and uses the best available backend:
 
-1. `sounddevice` ← **new in v3**, gapless PCM streaming via PortAudio, auto-installs
+1. `sounddevice` ← gapless PCM streaming via PortAudio, auto-installs
 2. `ffplay` ← best for file playback (all platforms)
 3. `afplay` ← macOS native
 4. `mpv` / `mplayer` ← cross-platform
@@ -160,18 +200,15 @@ Install [FFmpeg](https://ffmpeg.org/download.html) alongside `sounddevice` for t
 
 ---
 
-## 🐛 Known Issues & Roadmap
+## 🚧 Roadmap
 
-### v3 → v4 planned fixes
-- [ ] Brown Noise and Pink Noise volume levels can be uncomfortably loud — softening pass needed
+### Coming in v5
+- [ ] **Spotify integration** — connect your Spotify account and control playback from the terminal
+- [ ] **In-terminal video playback** — play videos directly inside the TUI
+
+### Known Issues
+- [ ] Brown Noise and Pink Noise volume levels can be uncomfortably loud — softening pass in progress
 - [ ] Bluetooth battery % not always retrievable depending on OS/driver support
-- [ ] Calendar integration not yet implemented (see below)
-
-### 🗓️ Upcoming: Calendar View (v4)
-A dedicated Calendar screen is planned with:
-- Google Calendar and Apple Calendar sync
-- Daily, Weekly, and Monthly view toggle
-- Inline event display within the TUI
 
 ---
 
