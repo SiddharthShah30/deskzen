@@ -92,10 +92,9 @@ def kbfmt(k):
 # ══════════════════════════════════════════════════════════════════════════════
 #  AUDIO ENGINE  –  procedural synth → ffplay / afplay / Windows WAVE
 # ══════════════════════════════════════════════════════════════════════════════
-SR    = 44100   # sample rate
-CHUNK = 2048    # samples per write
+SR    = 44100
+CHUNK = 2048
 
-# --- waveform generators ---
 def _sin(f, t):  return math.sin(2*math.pi*f*t)
 
 def _saw(f, t, nh=6):
@@ -117,36 +116,33 @@ def _tri(f, t, nh=5):
         s += ((-1)**h)*_sin(f*k, t)/(k*k)
     return s * (8/(math.pi**2))
 
-# --- envelope ---
 def env(i, n, a_frac=0.05, r_frac=0.15):
     at = int(n*a_frac); rel = int(n*r_frac)
     if i < at:   return i/max(1,at)
     if i > n-rel:return (n-i)/max(1,rel)
     return 1.0
 
-# --- note frequencies ---
 def midi(n):   return 440.0 * 2**((n-69)/12)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MUSIC LIBRARY  —  built-in focus sounds + user tracks
+#  MUSIC LIBRARY
 # ══════════════════════════════════════════════════════════════════════════════
 import array as _array
 
 LIBRARY_FILE = os.path.join(os.path.expanduser("~"), ".terminal_standby_music.json")
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CALENDAR ENGINE  — reads ICS (Google/Apple) + local JSON events
+#  CALENDAR ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
 CAL_FILE  = os.path.join(os.path.expanduser("~"), ".terminal_standby_cal.json")
 CAL_ICS   = os.path.join(os.path.expanduser("~"), ".terminal_standby.ics")
 _CAL_LOCK = threading.Lock()
-_CAL_EVENTS = []          # list of (datetime, datetime, str title)
-_CAL_STATUS = ""          # shown in calendar view
+_CAL_EVENTS = []
+_CAL_STATUS = ""
 
 
 def _parse_ics_date(val):
-    """Parse DTSTART / DTEND values (may be DATE or DATETIME)."""
     val = val.split(";")[-1].split(":")[-1].strip()
     for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%M%S", "%Y%m%d"):
         try:
@@ -157,10 +153,8 @@ def _parse_ics_date(val):
 
 
 def _parse_ics(text):
-    """Parse an ICS file/string → list of (start_dt, end_dt, title)."""
     events = []
     lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
-    # Unfold continuation lines
     unfolded = []
     for line in lines:
         if line.startswith((" ", "\t")) and unfolded:
@@ -189,9 +183,7 @@ def _parse_ics(text):
 
 
 def load_calendar_events():
-    """Load events from: ICS file + local JSON. Returns sorted list."""
     evs = []
-    # Local JSON events
     try:
         with open(CAL_FILE) as f:
             for e in json.load(f):
@@ -202,7 +194,6 @@ def load_calendar_events():
                     except: dt = None
                 if dt: evs.append((dt, dt, e.get("title","Event")[:50]))
     except Exception: pass
-    # ICS file (Google Cal / Apple Cal export)
     try:
         with open(CAL_ICS, encoding="utf-8", errors="replace") as f:
             evs += _parse_ics(f.read())
@@ -211,7 +202,6 @@ def load_calendar_events():
 
 
 def save_local_events(local_evs):
-    """Save manual JSON events (ICS events are not modified)."""
     try:
         with open(CAL_FILE, "w") as f:
             json.dump(local_evs, f, indent=2)
@@ -219,7 +209,6 @@ def save_local_events(local_evs):
 
 
 def refresh_calendar():
-    """Reload calendar events into _CAL_EVENTS. Call in background."""
     global _CAL_EVENTS, _CAL_STATUS
     evs = load_calendar_events()
     with _CAL_LOCK:
@@ -228,7 +217,6 @@ def refresh_calendar():
 
 
 def fetch_ics_url(url):
-    """Download an ICS URL and save to CAL_ICS. Returns (ok, msg)."""
     global _CAL_STATUS
     try:
         import urllib.request
@@ -250,7 +238,6 @@ def fetch_ics_url(url):
 
 
 def get_next_event():
-    """Return (title, time_str) for the next upcoming event."""
     now = datetime.datetime.now()
     with _CAL_LOCK:
         evs = list(_CAL_EVENTS)
@@ -261,28 +248,25 @@ def get_next_event():
             ts = f"{start.strftime('%H:%M')}  {title}"
             remaining = f"in {hh}h {mm:02d}m" if hh > 0 else f"in {mm}m"
             return ts[:40], remaining
-    # Check today's events that may be ongoing
     for start, end, title in evs:
         if start.date() == now.date() and start <= now:
             return f"{start.strftime('%H:%M')}  {title}"[:40], "ongoing"
     return "No events today", ""
 
 
-# Load events at startup in background
 threading.Thread(target=refresh_calendar, daemon=True).start()
 
 
-CACHE_DIR    = os.path.join(os.path.expanduser("~"), ".terminal_standby_cache")
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".terminal_standby_cache")
 SR = 44100
 
-# Built-in focus/ambient tracks (generated as streaming noise — no pre-synthesis wait)
 BUILTIN_TRACKS = [
     {
         "name":     "Brown Noise",
         "artist":   "Focus Aid",
         "source":   "builtin",
         "genre":    "brown",
-        "duration": 0,           # infinite / loops
+        "duration": 0,
         "bpm":      60,
         "desc":     "Deep rumble · coding & deep work",
     },
@@ -325,27 +309,31 @@ BUILTIN_TRACKS = [
 ]
 
 
-# ── Noise generators (streaming, return bytes per chunk) ─────────────────────
+# ── Noise generators ──────────────────────────────────────────────────────────
 
 def _gen_brown(n, state):
-    """Brown noise: double-integrated white noise — very deep, smooth rumble."""
-    out   = _array.array('h')
-    b1    = state.get('b1', 0.0)   # first integrator
-    b2    = state.get('b2', 0.0)   # second integrator (extra bass smoothing)
+    b1 = state.get('b1', 0.0)
+    b2 = state.get('b2', 0.0)
+    if not state.get('_warmed'):
+        for _ in range(8192):
+            w  = random.gauss(0, 1.0)
+            b1 = b1 * 0.998 + w * 0.002
+            b2 = b2 * 0.992 + b1 * 0.008
+        state['_warmed'] = True
+    out = _array.array('h')
     for _ in range(n):
-        white = random.gauss(0, 1.0)
-        b1    = b1 * 0.998 + white * 0.002
-        b2    = b2 * 0.995 + b1   * 0.005   # smooth again → softer, deeper
-        v = max(-32767, min(32767, int(b2 * 18000)))  # lower amplitude
+        w  = random.gauss(0, 1.0)
+        b1 = b1 * 0.998 + w * 0.002
+        b2 = b2 * 0.992 + b1 * 0.008
+        v  = max(-32767, min(32767, int(b2 * 22000)))
         out.append(v)
     state['b1'] = b1
     state['b2'] = b2
     return out.tobytes()
 
 def _gen_pink(n, state):
-    """Pink noise (1/f): Voss-McCartney + gentle low-pass for softness."""
     b    = state.get('b', [0.0]*7)
-    prev = state.get('p', 0.0)   # low-pass state
+    prev = state.get('p', 0.0)
     out  = _array.array('h')
     for _ in range(n):
         w = random.gauss(0, 1.0)
@@ -357,16 +345,14 @@ def _gen_pink(n, state):
         b[5] = -0.7616*b[5] - w*0.0168980
         pink = (b[0]+b[1]+b[2]+b[3]+b[4]+b[5]+b[6]+w*0.5362) * 0.11
         b[6] = w * 0.115926
-        # Single-pole low-pass @ ~8kHz cutoff → removes harshness
         prev = prev * 0.85 + pink * 0.15
-        v = max(-32767, min(32767, int(prev * 18000)))  # lower amplitude
+        v = max(-32767, min(32767, int(prev * 18000)))
         out.append(v)
     state['b'] = b
     state['p'] = prev
     return out.tobytes()
 
 def _gen_white(n, _state):
-    """White noise: flat spectrum."""
     out = _array.array('h')
     for _ in range(n):
         v = max(-32767, min(32767, int(random.gauss(0, 1.0) * 10000)))
@@ -374,20 +360,17 @@ def _gen_white(n, _state):
     return out.tobytes()
 
 def _gen_rain(n, state):
-    """Rain simulation: filtered brown noise + occasional droplet pops."""
     out  = _array.array('h')
     last = state.get('b', 0.0)
     drop_countdown = state.get('dc', 0)
     drop_amp       = state.get('da', 0.0)
     for i in range(n):
-        # base rain texture: faster-changing brown noise
         white = random.gauss(0, 1.0)
         last  = last * 0.95 + white * 0.05
         rain  = last * 0.6
-        # droplet pop
         if drop_countdown <= 0:
             drop_amp       = random.uniform(0.2, 0.9)
-            drop_countdown = random.randint(SR//20, SR//3)  # 50ms-333ms
+            drop_countdown = random.randint(SR//20, SR//3)
         else:
             drop_countdown -= 1
         drop  = drop_amp * math.exp(-drop_countdown / (SR * 0.002))
@@ -399,18 +382,15 @@ def _gen_rain(n, state):
     return out.tobytes()
 
 def _gen_space(n, state):
-    """Deep space: slow sine drone + subtle brown texture."""
     out   = _array.array('h')
     t_off = state.get('t', 0)
     last  = state.get('b', 0.0)
     for i in range(n):
         t     = (t_off + i) / SR
-        # fundamental drone ~60Hz with slow beating
         drone = (0.5 * math.sin(2*math.pi*60*t)
                + 0.3 * math.sin(2*math.pi*60.3*t)
                + 0.15* math.sin(2*math.pi*90*t)
                + 0.1 * math.sin(2*math.pi*120*t))
-        # subtle brown texture
         white = random.gauss(0, 1.0)
         last  = last * 0.999 + white * 0.001
         mix   = drone * 0.7 + last * 0.3
@@ -529,7 +509,7 @@ def resolve_youtube(url):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class AudioEngine:
-    CHUNK = SR // 8    # 0.125s chunks — smooth streaming, low latency
+    CHUNK = SR // 8
 
     def __init__(self):
         self.library    = load_library()
@@ -545,14 +525,12 @@ class AudioEngine:
         self.status_msg = ""
         self._spec_t    = 0.0
         self._backend   = self._detect()
-        # Try to install sounddevice in background if not found
         if self._backend != "sounddevice":
             threading.Thread(target=self._try_install_sd, daemon=True).start()
 
     def _try_install_sd(self):
-        """Silent one-time install of sounddevice if missing."""
         try:
-            import sounddevice  # noqa
+            import sounddevice
             self._backend = "sounddevice"
             return
         except ImportError:
@@ -562,32 +540,21 @@ class AudioEngine:
             subprocess.check_call(
                 [sys.executable, "-m", "pip", "install", "sounddevice", "-q"],
                 timeout=90, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            import sounddevice  # noqa
+            import sounddevice
             self._backend   = "sounddevice"
             self.status_msg = ""
         except Exception:
             self.status_msg = ""
 
     def _detect(self):
-        """
-        Priority order:
-          1. sounddevice  — pure Python, bundles PortAudio on Windows, gapless
-          2. ffplay        — subprocess pipe, works everywhere ffmpeg is installed
-          3. afplay        — macOS only, file-based fallback
-          4. aplay         — Linux ALSA fallback
-          5. winsound      — last resort Windows, WAV only
-        """
-        # Try sounddevice (auto-installs once if missing)
         try:
-            import sounddevice  # noqa
+            import sounddevice
             return "sounddevice"
         except Exception:
             pass
-        # Try subprocess players
         for cmd in ("ffplay", "afplay", "mpv", "mplayer", "aplay"):
             if shutil.which(cmd):
                 return cmd
-        # Windows: search common ffmpeg locations
         if platform.system() == "Windows":
             for p in [
                 os.path.join(os.environ.get("LOCALAPPDATA",""),  "ffmpeg","bin","ffplay.exe"),
@@ -598,7 +565,7 @@ class AudioEngine:
                 if os.path.isfile(p):
                     return p
             try:
-                import winsound  # noqa
+                import winsound
                 return "winsound"
             except ImportError:
                 pass
@@ -606,9 +573,8 @@ class AudioEngine:
 
     @staticmethod
     def _ensure_sounddevice():
-        """Install sounddevice if not present. Returns True on success."""
         try:
-            import sounddevice  # noqa
+            import sounddevice
             return True
         except Exception:
             pass
@@ -616,12 +582,11 @@ class AudioEngine:
             subprocess.check_call(
                 [sys.executable, "-m", "pip", "install", "sounddevice", "-q"],
                 timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            import sounddevice  # noqa
+            import sounddevice
             return True
         except Exception:
             return False
 
-    # ── spectrum (beat/noise reactive) ───────────────────────────────────
     def get_spectrum(self, n=32):
         if not self.playing:
             return [0.0]*n
@@ -654,7 +619,6 @@ class AudioEngine:
             out.append(min(1.0, max(0.0, v)))
         return out
 
-    # ── playback ─────────────────────────────────────────────────────────
     def _new_gen(self):
         with self._lock:
             self._play_gen += 1
@@ -678,7 +642,6 @@ class AudioEngine:
             self._play_builtin(gen, trk, start_sec)
         else:
             self._play_file(gen, trk["source"], start_sec, trk.get("duration", 0))
-        # natural end → advance (only for finite tracks)
         if not self._alive(gen):
             return
         with self._lock:
@@ -704,54 +667,43 @@ class AudioEngine:
             if self.playing:
                 self._spawn()
 
-    # ── built-in noise streaming ──────────────────────────────────────────
     def _play_builtin(self, gen, trk, start_sec):
         genre = trk.get("genre", "brown")
         genfn = _GENERATORS.get(genre, _gen_brown)
         state = {}
-        # Advance generator state to match start position (no audio output)
         skip = int(start_sec * SR / self.CHUNK)
         for _ in range(skip):
             if not self._alive(gen): return
             genfn(self.CHUNK, state)
 
         b = self._backend or ""
-        # ── sounddevice path (best: direct to OS audio, no subprocess) ────
         if b == "sounddevice":
             self._stream_sounddevice(gen, genfn, state)
-        # ── ffplay/aplay pipe path ─────────────────────────────────────────
         elif b in ("ffplay","aplay") or (os.path.isfile(b) and "ffplay" in b.lower()):
             self._stream_pipe(gen, genfn, state)
-        # ── WAV segment fallback (afplay / winsound) ───────────────────────
         else:
             self._stream_wav_segments(gen, genfn, state)
 
     def _stream_sounddevice(self, gen, genfn, state):
-        """Play noise directly via sounddevice — gapless, zero subprocess."""
         try:
             import sounddevice as sd
         except ImportError:
-            # Not installed yet — fall through to pipe/wav
             self._stream_pipe(gen, genfn, state)
             return
-
         try:
             with sd.RawOutputStream(samplerate=SR, channels=1,
                                     dtype='int16', blocksize=self.CHUNK) as stream:
                 while self._alive(gen):
                     chunk = genfn(self.CHUNK, state)
-                    stream.write(chunk)   # blocks until OS buffer is ready
+                    stream.write(chunk)
         except Exception as e:
             err = str(e).lower()
             if "invalid device" in err or "no default" in err or "device unavailable" in err:
-                # No audio output device — fall back gracefully
                 self._stream_pipe(gen, genfn, state)
             elif self._alive(gen):
-                # Other error — retry once via pipe
                 self._stream_pipe(gen, genfn, state)
 
     def _stream_pipe(self, gen, genfn, state):
-        """Stream raw PCM into ffplay or aplay via stdin pipe."""
         b = self._backend or ""
         ffplay_bin = None
         if b == "ffplay" or (os.path.isfile(b) and "ffplay" in b.lower()):
@@ -789,11 +741,10 @@ class AudioEngine:
                 if self._proc is proc: self._proc = None
 
     def _stream_wav_segments(self, gen, genfn, state):
-        """Generate 30s WAV files and play them in a loop (afplay / winsound)."""
         import tempfile, wave as wv
         SEG  = 30
         SR_W = 22050 if self._backend == "winsound" else SR
-        dec  = SR // SR_W   # decimation factor
+        dec  = SR // SR_W
 
         while self._alive(gen):
             raw = genfn(SEG * SR, state)
@@ -844,13 +795,10 @@ class AudioEngine:
                 try: os.unlink(tmp.name)
                 except: pass
 
-    # ── file playback (user tracks) ───────────────────────────────────────
     def _play_file(self, gen, path, start_sec, duration):
-        """Play a user audio file via best available backend."""
         b  = self._backend or ""
         ss = str(int(start_sec))
 
-        # sounddevice can't decode MP3/FLAC — use ffplay/subprocess for files
         ffplay_bin = None
         if b == "ffplay" or (os.path.isfile(b) and "ffplay" in b.lower()):
             ffplay_bin = b
@@ -889,7 +837,6 @@ class AudioEngine:
 
     def _play_win_winsound(self, gen, path, remaining):
         import winsound, tempfile, wave as wv
-        # Convert to WAV via ffmpeg if available, else try direct
         wav_path = path; cleanup = False
         if not path.lower().endswith(".wav"):
             ffmpeg = shutil.which("ffmpeg")
@@ -905,7 +852,7 @@ class AudioEngine:
                     except: pass
                     return
             else:
-                return  # can't play non-WAV without ffmpeg
+                return
         try:
             done = threading.Event()
             def _pl(p=wav_path, e=done):
@@ -945,8 +892,7 @@ class AudioEngine:
             pass
 
     def _kill(self):
-        """Stop current playback immediately."""
-        self._new_gen()          # invalidate running thread
+        self._new_gen()
         with self._lock:
             proc = self._proc
             self._proc = None
@@ -959,7 +905,6 @@ class AudioEngine:
                 winsound.PlaySound(None, winsound.SND_PURGE)
             except: pass
 
-    # ── public API ────────────────────────────────────────────────────────
     def toggle_play(self):
         with self._lock:
             self.playing = not self.playing
@@ -1044,7 +989,6 @@ class AudioEngine:
         return True, f"Removed: {name}"
 
     def tick(self):
-        """Advance elapsed counter. Call each frame."""
         now = time.time()
         with self._lock:
             dt         = now - self._wall
@@ -1056,7 +1000,7 @@ class AudioEngine:
             if dur > 0:
                 self.elapsed = min(self.elapsed + dt, dur)
             else:
-                self.elapsed += dt   # infinite loop — just count up
+                self.elapsed += dt
 
     @property
     def current(self):
@@ -1065,6 +1009,322 @@ class AudioEngine:
         return self.library[self.track_idx]
 
 
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIDEO PLAYER
+# ══════════════════════════════════════════════════════════════════════════════
+class VideoPlayer:
+    def __init__(self):
+        self.playing     = False
+        self.title       = ""
+        self.status      = ""
+        self._proc       = None
+        self._lock       = threading.Lock()
+        self._renderer   = None
+        self._installing = False
+        threading.Thread(target=self._setup, daemon=True).start()
+
+    def _setup(self):
+        r = self._find_mpv()
+        if r:
+            self._renderer = r
+            self.status = ""
+            return
+        fp = self._find_ffplay()
+        if fp:
+            self._renderer = fp
+            self.status = "using ffplay (install mpv for better quality)"
+            return
+        self._auto_install_mpv()
+
+    def _re_detect(self):
+        r = self._find_mpv() or self._find_ffplay()
+        if r:
+            self._renderer = r
+            self.status = ""
+
+    def _find_mpv(self):
+        p = shutil.which("mpv")
+        if p: return p
+        if platform.system() == "Windows":
+            for candidate in [
+                os.path.join(os.environ.get("LOCALAPPDATA",""), "Programs","mpv","mpv.exe"),
+                os.path.join(os.environ.get("LOCALAPPDATA",""), "mpv","mpv.exe"),
+                r"C:\mpv\mpv.exe",
+                r"C:\Program Files\mpv\mpv.exe",
+                r"C:\Program Files (x86)\mpv\mpv.exe",
+            ]:
+                if os.path.isfile(candidate):
+                    return candidate
+        return None
+
+    def _find_ffplay(self):
+        p = shutil.which("ffplay")
+        if p: return p
+        if platform.system() == "Windows":
+            local = os.environ.get("LOCALAPPDATA","")
+            user  = os.environ.get("USERPROFILE","")
+            for candidate in [
+                os.path.join(local,  "ffmpeg", "bin", "ffplay.exe"),
+                os.path.join(user,   "ffmpeg", "bin", "ffplay.exe"),
+                r"C:\ffmpeg\bin\ffplay.exe",
+                r"C:\Program Files\ffmpeg\bin\ffplay.exe",
+                r"C:\Program Files (x86)\ffmpeg\bin\ffplay.exe",
+                os.path.join(local, "Programs", "ffmpeg", "bin", "ffplay.exe"),
+            ]:
+                if os.path.isfile(candidate): return candidate
+        return None
+
+    def _auto_install_mpv(self):
+        sys_name = platform.system()
+        self._installing = True
+        self.status = "installing mpv..."
+        try:
+            if sys_name == "Windows":
+                if shutil.which("winget"):
+                    subprocess.run(
+                        ["winget", "install", "--id", "mpv.mpv",
+                         "--silent", "--accept-package-agreements",
+                         "--accept-source-agreements"],
+                        capture_output=True, timeout=120)
+                    r = self._find_mpv()
+                    if r:
+                        self._renderer = r
+                        self.status = "mpv installed"
+                        return
+                self._download_mpv_windows()
+            elif sys_name == "Darwin":
+                if shutil.which("brew"):
+                    subprocess.run(["brew", "install", "mpv"],
+                                   capture_output=True, timeout=180)
+                    r = self._find_mpv()
+                    if r:
+                        self._renderer = r
+                        self.status = "mpv installed via brew"
+                        return
+            elif sys_name == "Linux":
+                for mgr, cmd in [
+                    ("apt-get",  ["sudo","apt-get","install","-y","mpv"]),
+                    ("dnf",      ["sudo","dnf","install","-y","mpv"]),
+                    ("pacman",   ["sudo","pacman","-S","--noconfirm","mpv"]),
+                    ("zypper",   ["sudo","zypper","install","-y","mpv"]),
+                ]:
+                    if shutil.which(mgr):
+                        subprocess.run(cmd, capture_output=True, timeout=120)
+                        r = self._find_mpv()
+                        if r:
+                            self._renderer = r
+                            self.status = f"mpv installed via {mgr}"
+                            return
+                        break
+        except Exception as e:
+            self.status = f"auto-install failed: {e} — install mpv manually"
+        finally:
+            self._installing = False
+        if not self._renderer:
+            fp = self._find_ffplay()
+            if fp:
+                self._renderer = fp
+                self.status = "mpv unavailable — using ffplay"
+            else:
+                self.status = "no player found — install mpv manually"
+
+    def _download_mpv_windows(self):
+        try:
+            import urllib.request, zipfile, io
+            self.status = "finding latest mpv release..."
+            api_url2 = "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest"
+            try:
+                req = urllib.request.Request(api_url2,
+                    headers={"User-Agent": "terminal-standby/1"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read())
+                asset_url = None
+                for asset in data.get("assets", []):
+                    n = asset.get("name","")
+                    if "x86_64" in n and n.endswith(".zip") and "mpv" in n:
+                        asset_url = asset["browser_download_url"]
+                        break
+            except Exception:
+                asset_url = None
+
+            if not asset_url:
+                self.status = "visit mpv.io/installation to install mpv manually"
+                return
+
+            self.status = "downloading mpv (~15 MB)..."
+            req = urllib.request.Request(asset_url,
+                headers={"User-Agent": "terminal-standby/1"})
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                zip_data = resp.read()
+
+            install_dir = os.path.join(
+                os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "mpv")
+            os.makedirs(install_dir, exist_ok=True)
+            self.status = "extracting mpv..."
+            with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+                for member in zf.namelist():
+                    if member.endswith("mpv.exe") or member.endswith("mpv.com"):
+                        basename = os.path.basename(member)
+                        dest = os.path.join(install_dir, basename)
+                        with zf.open(member) as src, open(dest, "wb") as dst:
+                            dst.write(src.read())
+
+            mpv_exe = os.path.join(install_dir, 'mpv.exe')
+            if os.path.isfile(mpv_exe):
+                self._renderer = mpv_exe
+                self.status = "mpv installed to " + install_dir
+            else:
+                self.status = "extraction done but mpv.exe not found — install manually"
+        except Exception as e:
+            self.status = f"download failed: {e} — visit mpv.io/installation"
+
+    def _ensure_ytdlp(self):
+        try:
+            import yt_dlp
+            return True
+        except ImportError:
+            pass
+        try:
+            self.status = "installing yt-dlp..."
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "yt-dlp", "-q"],
+                timeout=90, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import yt_dlp
+            return True
+        except Exception:
+            return False
+
+    def play(self, source, title=""):
+        self.stop()
+        self.title  = title or os.path.basename(source)[:40]
+        self.status = "loading..."
+
+        def _run():
+            for _ in range(80):
+                if self._renderer or not self._installing: break
+                time.sleep(0.1)
+            renderer = self._renderer
+            if not renderer:
+                self.status = ("still installing player..." if self._installing
+                               else "no player found — see VIDEO view for install help")
+                self.playing = False
+                return
+            try:
+                is_mpv = "mpv" in os.path.basename(renderer).lower()
+                if is_mpv:
+                    if platform.system() == "Windows":
+                        cmd = [renderer, "--really-quiet", source]
+                    else:
+                        cmd = [renderer, "--vo=tct", "--really-quiet", source]
+                else:
+                    ffplay_path = renderer if os.path.isfile(renderer) else shutil.which(renderer) or renderer
+                    cmd = [ffplay_path, "-loglevel", "quiet", "-autoexit", source]
+
+                self.status = f"launching player..."
+                proc = subprocess.Popen(cmd,
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL)
+                with self._lock:
+                    self._proc   = proc
+                    self.playing = True
+                    self.status  = f"playing — {self.title}"
+                proc.wait()
+                with self._lock:
+                    self.playing = False
+                    self._proc   = None
+                    self.status  = f"finished — {self.title}"
+                    self.title   = ""
+            except FileNotFoundError:
+                self.status  = f"player executable not found: {renderer}"
+                self._renderer = None
+                threading.Thread(target=self._setup, daemon=True).start()
+            except Exception as e:
+                self.status  = f"error: {e}"
+                self.playing = False
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def play_youtube(self, url):
+        if not self._renderer and not self._installing:
+            threading.Thread(target=self._setup, daemon=True).start()
+
+        self.status = "fetching stream info..."
+
+        def _stream():
+            try:
+                if not self._ensure_ytdlp():
+                    self.status = "yt-dlp unavailable — pip install yt-dlp"
+                    return
+
+                import yt_dlp
+
+                ydl_opts = {
+                    "quiet":       True,
+                    "no_warnings": True,
+                    "format":      "best[height<=480]/bestvideo[height<=480]+bestaudio/best",
+                    "noplaylist":  True,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+
+                if not info:
+                    self.status = "could not fetch video info"
+                    return
+
+                title      = (info.get("title") or "YouTube Video")[:40]
+                stream_url = info.get("url") or info.get("manifest_url", "")
+
+                if not stream_url and info.get("formats"):
+                    fmts = info["formats"]
+                    good = [f for f in fmts
+                            if f.get("acodec","none") != "none"
+                            and (f.get("height") or 999) <= 480]
+                    if not good:
+                        good = [f for f in fmts if f.get("acodec","none") != "none"]
+                    if not good:
+                        good = fmts
+                    best = sorted(good, key=lambda f: f.get("height") or 0)[-1]
+                    stream_url = best.get("url","")
+
+                if not stream_url:
+                    self.status = "no playable stream URL found"
+                    return
+
+                self.play(stream_url, title)
+
+            except Exception as e:
+                err = str(e)
+                if "WinError" in err or "FileNotFoundError" in err:
+                    self.status = "yt-dlp internal error — try: pip install -U yt-dlp"
+                elif "Sign in" in err or "bot" in err.lower():
+                    self.status = "YouTube blocked request — try again or use a file"
+                elif "unavailable" in err.lower():
+                    self.status = "video unavailable in your region"
+                else:
+                    self.status = f"error: {err[:60]}"
+
+        threading.Thread(target=_stream, daemon=True).start()
+
+    def stop(self):
+        with self._lock:
+            proc = self._proc
+            self._proc   = None
+            self.playing = False
+        if proc:
+            try: proc.terminate()
+            except: pass
+        self.status = ""
+
+    def has_renderer(self): return self._renderer is not None
+    def renderer_name(self):
+        if self._installing: return "installing..."
+        if not self._renderer: return "none"
+        return os.path.basename(self._renderer)
+
+
+VIDEO = VideoPlayer()
 AUDIO = AudioEngine()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1088,8 +1348,8 @@ class SysData:
         self.cpu_cores = os.cpu_count() or 1
         self._pnet     = None
         self._boot     = psutil.boot_time() if HAS_PSUTIL else time.time()
-        self.devices       = []   # list of dicts: name,type,connected,battery
-        self._dev_last     = 0.0  # last device scan time
+        self.devices       = []
+        self._dev_last     = 0.0
         self._dev_scanning = False
 
     @staticmethod
@@ -1098,7 +1358,6 @@ class SysData:
         if s == "Darwin":
             v = platform.mac_ver()[0]; return f"macOS {v}"
         if s == "Windows": return f"Windows {platform.version()[:22]}"
-        # try to get distro name on Linux
         try:
             for f in ["/etc/os-release","/etc/lsb-release"]:
                 if os.path.exists(f):
@@ -1185,14 +1444,10 @@ class SysData:
 
     @staticmethod
     def _scan_devices():
-        """Scan real connected devices: Bluetooth, USB, HID. Cross-platform."""
         devs = []
         sys_name = platform.system()
 
         if sys_name == "Windows":
-            # ── Step 1: get CURRENTLY CONNECTED BT devices via IsConnected prop ──
-            # DEVPKEY_Device_IsConnected = {83DA6326-97A6-4088-9453-A1923F573B29} 15
-            # This is the correct "right now connected" flag — NOT Status OK
             _SKIP = {
                 "avrcp","pbap","pan","hfp","hsp","gatt","sdp","rfcomm","obex",
                 "map","nap","pse","panu","service","profile","gateway","push",
@@ -1207,10 +1462,9 @@ class SysData:
                 "vendor-defined","unknown device",
             }
 
-            bt_names = {}   # key -> entry dict, for battery fill-in
+            bt_names = {}
             seen_names = set()
 
-            # BT: query IsConnected property for every BT device
             try:
                 ps_bt = (
                     "$skip=@('avrcp','pbap','hfp','hsp','gatt','sdp','rfcomm',"
@@ -1254,9 +1508,7 @@ class SysData:
                     bt_names[key] = entry
             except Exception: pass
 
-            # ── Step 2: battery — three methods, first one wins ────────────
             if bt_names:
-                # Method A: DEVPKEY {104EA319} 2  (GATT battery, Win10 1903+)
                 try:
                     ps_batA = (
                         "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue |"
@@ -1283,7 +1535,6 @@ class SysData:
                             bt_names[bkey]["battery"] = int(bval)
                 except Exception: pass
 
-                # Method B: Registry BatteryLevel key
                 try:
                     ps_batB = (
                         "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue |"
@@ -1310,7 +1561,6 @@ class SysData:
                             bt_names[bkey]["battery"] = int(bval)
                 except Exception: pass
 
-                # Method C: WMI Win32_Battery (paired devices that expose it)
                 try:
                     ps_batC = (
                         "Get-WmiObject Win32_Battery -ErrorAction SilentlyContinue |"
@@ -1335,11 +1585,9 @@ class SysData:
                             bt_names[bkey]["battery"] = int(bval)
                 except Exception: pass
 
-            # Strip internal _iid field before storing
             for d in devs:
                 d.pop("_iid", None)
 
-            # ── Step 3: USB / WPD / gamepad devices ───────────────────────
             try:
                 ps_usb = (
                     "Get-WmiObject Win32_PnPEntity -ErrorAction SilentlyContinue |"
@@ -1388,13 +1636,11 @@ class SysData:
             except Exception: pass
 
         elif sys_name == "Darwin":
-            # ── macOS: system_profiler for BT + USB ──────────────────────
             try:
                 r = subprocess.run(
                     ["system_profiler","SPBluetoothDataType","-json"],
                     capture_output=True, text=True, timeout=5)
-                import json as _json
-                data = _json.loads(r.stdout)
+                data = json.loads(r.stdout)
                 bt_data = data.get("SPBluetoothDataType",[{}])[0]
                 connected = bt_data.get("device_connected", [])
                 for entry in connected:
@@ -1410,8 +1656,7 @@ class SysData:
                 r = subprocess.run(
                     ["system_profiler","SPUSBDataType","-json"],
                     capture_output=True, text=True, timeout=5)
-                import json as _json
-                data = _json.loads(r.stdout)
+                data = json.loads(r.stdout)
                 def _walk_usb(items):
                     for item in items:
                         for k,v in item.items():
@@ -1424,8 +1669,7 @@ class SysData:
                 _walk_usb(data.get("SPUSBDataType",[]))
             except Exception: pass
 
-        else:  # Linux
-            # ── Bluetooth via bluetoothctl ────────────────────────────────
+        else:
             try:
                 r = subprocess.run(["bluetoothctl","devices","Connected"],
                                    capture_output=True, text=True, timeout=3)
@@ -1435,11 +1679,9 @@ class SysData:
                         devs.append({"name":parts[2][:28],"type":"BT",
                                      "connected":True,"battery":None})
             except Exception: pass
-            # ── USB via lsusb ─────────────────────────────────────────────
             try:
                 r = subprocess.run(["lsusb"], capture_output=True, text=True, timeout=3)
                 for line in r.stdout.splitlines():
-                    # "Bus 001 Device 002: ID 1234:5678 Vendor Product Name"
                     if ":" in line:
                         name = line.split(":",1)[1].strip().split("ID")[0]
                         name = name.strip()
@@ -1448,7 +1690,7 @@ class SysData:
                                          "connected":True,"battery":None})
             except Exception: pass
 
-        return devs[:16]   # cap at 16 devices
+        return devs[:16]
 
     def poll(self):
         if not HAS_PSUTIL: return
@@ -1476,7 +1718,6 @@ class SysData:
             except: pass
             try: self.uptime = int(time.time()-self._boot)
             except: pass
-        # Scan devices every 8 seconds in background thread (slow PS calls)
         if time.time() - self._dev_last > 8 and not self._dev_scanning:
             self._dev_last     = time.time()
             self._dev_scanning = True
@@ -1544,30 +1785,22 @@ def big_time(win, y, x, s, col=P_HI):
 def btw(s): return sum(len(_D.get(c,["     "])[0])+1 for c in s)-1
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CAVA-STYLE SPECTRUM VISUALIZER WIDGET
+#  CAVA-STYLE SPECTRUM VISUALIZER
 # ══════════════════════════════════════════════════════════════════════════════
-# Block characters for sub-character resolution (8 levels per cell)
-_VCHR = " ▁▂▃▄▅▆▇█"   # 0-8
+_VCHR = " ▁▂▃▄▅▆▇█"
 
 def draw_spectrum(win, y, x, h, w, spectrum, col_low=P_CYAN, col_mid=P_BLUE, col_hi=P_PINK):
-    """
-    Draw a CAVA-style spectrum bar chart.
-    spectrum: list of floats [0..1], len=number of bars
-    h: height in rows; w: width in chars
-    Each bar is 2 chars wide + 1 gap.
-    """
     n_bars = min(len(spectrum), w // 2)
     if n_bars < 1: return
 
     for b in range(n_bars):
         amp   = spectrum[b]
-        # height in sub-char units (each row = 8 levels)
         total = h * 8
         val   = int(amp * total)
 
         bx = x + b * (w // n_bars)
         for row in range(h):
-            row_y = y + h - 1 - row        # draw bottom-up
+            row_y = y + h - 1 - row
             row_units_start = row * 8
             row_units_end   = row_units_start + 8
             if val <= row_units_start:
@@ -1578,11 +1811,10 @@ def draw_spectrum(win, y, x, h, w, spectrum, col_low=P_CYAN, col_mid=P_BLUE, col
                 lvl = val - row_units_start
                 ch  = _VCHR[lvl]
 
-            # colour gradient: low=cyan, mid=blue, high=pink
             frac = (h - 1 - row) / max(1, h-1)
-            if frac < 0.4:   col = col_low
-            elif frac < 0.75:col = col_mid
-            else:             col = col_hi
+            if frac < 0.4:    col = col_low
+            elif frac < 0.75: col = col_mid
+            else:              col = col_hi
 
             put(win, row_y, bx,   ch, cp(col, bold=(frac>0.6)))
             put(win, row_y, bx+1, ch, cp(col, bold=(frac>0.6)))
@@ -1590,7 +1822,7 @@ def draw_spectrum(win, y, x, h, w, spectrum, col_low=P_CYAN, col_mid=P_BLUE, col
 # ══════════════════════════════════════════════════════════════════════════════
 #  APP STATE
 # ══════════════════════════════════════════════════════════════════════════════
-VIEWS = ["DASHBOARD","CLOCK + MUSIC","FOCUS","NEOFETCH","NETWORK","LIBRARY","CALENDAR"]
+VIEWS = ["DASHBOARD","CLOCK + MUSIC","FOCUS","NEOFETCH","NETWORK","LIBRARY","CALENDAR","VIDEO"]
 
 class State:
     def __init__(self):
@@ -1599,7 +1831,6 @@ class State:
         self.todo_cur   = 0
         self.todo_add   = False
         self.todo_buf   = ""
-        # pomodoro
         self.pomo_total = 25*60.0
         self.pomo_secs  = 25*60.0
         self.pomo_run   = False
@@ -1608,12 +1839,10 @@ class State:
         self._pw        = time.time()
         self.focus_modes= ["DEEP WORK","READING","CODING","REVIEW","WRITING"]
         self.focus_idx  = 0
-        # calendar view state
-        self.cal_mode  = "week"   # day | week | month
-        self.cal_date  = datetime.datetime.now().date()  # currently viewed date
+        self.cal_mode  = "week"
+        self.cal_date  = datetime.datetime.now().date()
         self.cal_add   = False
-        self.cal_buf   = ""   # typing buffer for add-event
-        # spectrum smoothing
+        self.cal_buf   = ""
         self._spec_smooth = [0.0]*32
 
 ST = State()
@@ -1625,7 +1854,6 @@ def tick():
     now = time.time()
     AUDIO.tick()
 
-    # pomodoro
     if ST.pomo_run:
         dt = now - ST._pw
         ST.pomo_secs = max(0.0, ST.pomo_secs - dt)
@@ -1642,13 +1870,9 @@ def tick():
                 ST.pomo_secs   = 25*60.0
     ST._pw = now
 
-    # smooth spectrum
     raw = AUDIO.get_spectrum(32)
     ST._spec_smooth = [0.6*s + 0.4*r for s,r in zip(ST._spec_smooth, raw)]
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SHARED: next event helper
-# ══════════════════════════════════════════════════════════════════════════════
 def next_event():
     return get_next_event()
 
@@ -1659,7 +1883,6 @@ def v_dashboard(win, W, H):
     now = datetime.datetime.now()
     sd  = SD.snap()
 
-    # ── row 1: clock + status ─────────────────────────────────────────────
     cw = W//2 - 1
     box(win, 1, 0, 9, cw, "CLOCK")
     ts = now.strftime("%H:%M")
@@ -1682,8 +1905,6 @@ def v_dashboard(win, W, H):
     put(win, 6, rx+2, f"NET  {sd['ssid'][:rw-8]}", cp(P_DIM))
     put(win, 7, rx+2, f"I/O  ↓{kbfmt(sd['net_dn'])} ↑{kbfmt(sd['net_up'])}", cp(P_DIM))
 
-    # ── row 2: todos ──────────────────────────────────────────────────────
-    # Reserve space: top(9) + gap(1) + todo_box + gap(1) + pomo(5) + vis(6) + navbar(2) + hint(1)
     reserved   = 10 + 1 + 5 + 6 + 2 + 1
     todo_inner = max(2, H - reserved)
     todo_h     = todo_inner + 2 + (1 if ST.todo_add else 0)
@@ -1709,7 +1930,6 @@ def v_dashboard(win, W, H):
         put(win, 12+visible_n, 2,
             f" + {ST.todo_buf}{'█' if int(time.time()*2)%2 else ' '}", cp(P_AMBER))
 
-    # ── row 3: pomodoro + next event ──────────────────────────────────────
     by = 11 + todo_h + 1
     hw = W//2 - 1
     box(win, by, 0, 5, hw, "POMODORO  [p]=start  [r]=reset")
@@ -1727,14 +1947,13 @@ def v_dashboard(win, W, H):
     put(win,by+1,hw+3,evtitle,cp(P_HI))
     put(win,by+2,hw+3,evtime, cp(P_DIM))
 
-    # ── row 4: CAVA spectrum visualizer ───────────────────────────────────
     vy = by + 6
     vis_h = max(3, H - vy - 3)
     if vy + vis_h + 1 < H:
         td   = AUDIO.current
         lbl  = f"VISUALIZER  ~ {td['name'][:30]} — {td['artist']}"
         box(win, vy, 0, vis_h+2, W-1, lbl)
-        spec = list(ST._spec_smooth)  # snapshot to avoid mid-render mutation
+        spec = list(ST._spec_smooth)
         draw_spectrum(win, vy+1, 1, vis_h, W-3, spec)
 
     put(win, H-1, 0,
@@ -1751,11 +1970,9 @@ def v_clock(win, W, H):
     big_time(win, 2, max(0,(W-tw)//2), ts)
     centre(win, 8, now.strftime("%A  %B %d, %Y").upper(), cp(P_DIM))
 
-    # seconds bar
     sw = min(W-8, 52)
     hbar(win, 9, (W-sw)//2, sw, now.second*100//60, P_MID)
 
-    # ── music player box ──────────────────────────────────────────────────
     mw = min(W-4, 68); mx=(W-mw)//2; my=11
     td      = AUDIO.current
     dur     = float(td.get("duration") or 0)
@@ -1765,7 +1982,7 @@ def v_clock(win, W, H):
         elapsed = min(elapsed, dur)
         pct = int(elapsed / dur * 100)
     else:
-        pct = int((elapsed % 60) / 60 * 100)   # infinite: cycle bar per minute
+        pct = int((elapsed % 60) / 60 * 100)
     em,es  = divmod(int(elapsed), 60)
     dm,ds2 = divmod(int(dur), 60) if dur > 0 else (0, 0)
 
@@ -1776,7 +1993,6 @@ def v_clock(win, W, H):
                  "rain":"Rain on Glass","space":"Deep Space"}.get(genre,"")
     sub = f"[{genre_lbl}]  {td['artist']}" if genre_lbl else f"by {td['artist']}"
     put(win, my+2, mx+2, sub[:mw-4], cp(P_DIM))
-    # Show audio backend or NO AUDIO warning
     if not AUDIO._backend:
         put(win, my+1, mx+mw-22, "! NO AUDIO BACKEND !", cp(P_RED, bold=True))
         put(win, my+2, mx+2, "  pip install sounddevice  OR  install ffmpeg", cp(P_AMBER))
@@ -1789,7 +2005,6 @@ def v_clock(win, W, H):
     rt = f"{dm}:{ds2:02d}" if dur > 0 else "live"
     put(win, my+4, mx+mw-2-len(rt), rt, cp(P_DIM))
 
-    # controls
     play_lbl = "[ || PAUSE ]" if AUDIO.playing else "[ ▶ PLAY  ]"
     play_col = P_AMBER if AUDIO.playing else P_GREEN
     put(win, my+5, mx+2,        "|< prev [z]",  cp(P_DIM))
@@ -1804,7 +2019,6 @@ def v_clock(win, W, H):
     put(win, my+6, mx+mw//2+2,  rep_s,   cp(rcol))
     put(win, my+6, mx+mw-10,    f"{AUDIO.track_idx+1}/{len(AUDIO.library)}", cp(P_DIM))
 
-    # track list
     for i in range(min(4, len(AUDIO.library))):
         ri = (AUDIO.track_idx + i) % len(AUDIO.library)
         t_entry = AUDIO.library[ri]; tn, ta = t_entry["name"], t_entry["artist"]
@@ -1814,7 +2028,6 @@ def v_clock(win, W, H):
             f"{pre}{tn[:mw//2-4]}  —  {ta}"[:mw-4],
             cp(P_HI if sel else P_DIM))
 
-    # ── CAVA spectrum underneath player ───────────────────────────────────
     vy  = my + 12 + 1
     vis_h = max(3, H - vy - 3)
     if vy + vis_h + 1 < H:
@@ -1834,13 +2047,11 @@ def v_focus(win, W, H):
 
     centre(win, 1, f"── {fm} ──", cp(P_HI,bold=True)|curses.A_BOLD)
 
-    # arc
     pm=int(ST.pomo_secs)//60; ps=int(ST.pomo_secs)%60
     pct=1.0-ST.pomo_secs/max(1,ST.pomo_total)
     aw=min(W-10,52); filled=int(pct*aw)
     centre(win, 3, "╺"+"━"*filled+"╌"*(aw-filled)+"╸", cp(pc))
 
-    # big timer
     ts = f"{pm:02d}:{ps:02d}"
     big_time(win, 5, max(0,(W-btw(ts))//2), ts, pc)
 
@@ -1865,7 +2076,6 @@ def v_focus(win, W, H):
     put(win,gy,gx,f"Daily goal: {ST.pomo_done*25}/120 min  ({gp}%)",cp(P_DIM))
     hbar(win,gy+1,gx,gw,gp,P_GREEN)
 
-    # mini spectrum strip at bottom
     vy=gy+3
     vis_h=max(2,H-vy-3)
     if vy+vis_h+1<H:
@@ -1875,7 +2085,7 @@ def v_focus(win, W, H):
     put(win,H-1,0," [p] start/pause  [r] reset  [s] skip  [f] mode  [←→] views  [q] quit ",cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  VIEW 4 — NEOFETCH  (rich, real data, cross-platform)
+#  VIEW 4 — NEOFETCH
 # ══════════════════════════════════════════════════════════════════════════════
 _LOGO_MAC = [
     "        ###        ",
@@ -1926,11 +2136,8 @@ def v_neofetch(win, W, H):
 
     uh,rem=divmod(sd["uptime"],3600); um=rem//60
     shell=os.environ.get("SHELL","cmd").split("/")[-1].split("\\")[-1]
-
-    # get terminal size
     term_h, term_w = win.getmaxyx()
 
-    # real packages count attempt
     pkg_count = "N/A"
     try:
         if sys_name=="Darwin":
@@ -1944,7 +2151,6 @@ def v_neofetch(win, W, H):
                     break
     except: pass
 
-    # terminal emulator
     term_emu = os.environ.get("TERM_PROGRAM", os.environ.get("TERM","unknown"))
 
     info = [
@@ -1975,7 +2181,6 @@ def v_neofetch(win, W, H):
         put(win, ay+2+i, ix,    f"{k:<10}", cp(P_CYAN))
         put(win, ay+2+i, ix+10, v[:W-ix-13], cp(P_HI))
 
-    # colour palette
     pal_y = ay + max(len(art), len(info)+3) + 1
     put(win, pal_y, ax, "colours  ", cp(P_DIM))
     palettes = [P_DIM,P_MID,P_HI,P_RED,P_AMBER,P_GREEN,P_CYAN,P_BLUE,P_PINK]
@@ -1984,7 +2189,6 @@ def v_neofetch(win, W, H):
     for i,c in enumerate(palettes):
         put(win, pal_y+1, ax+9+i*3, "██", cp(c,bold=True))
 
-    # resource bars
     br_y = pal_y + 3
     bw2  = W - 14
     if br_y + 8 < H:
@@ -2021,8 +2225,7 @@ def v_network(win, W, H):
     put(win,12,2,"CPU ",cp(P_DIM)); hbar(win,12,7,hw-10,int(sd["cpu"]),P_CYAN)
 
     rx=hw+1; rw=W-rx-1
-    devices = SD.devices   # real scanned devices from SysData
-    # type colour map
+    devices = SD.devices
     _tc = {"BT":P_CYAN,"USB":P_BLUE,"CTRL":P_PINK,"PHONE":P_GREEN,
             "AUDIO":P_AMBER,"KBD":P_DIM,"HID":P_DIM,"CAM":P_DIM,
             "STOR":P_MID,"MTP":P_GREEN,"USB-C":P_BLUE}
@@ -2039,7 +2242,6 @@ def v_network(win, W, H):
             ry  = 2 + i
             bat = dev.get("battery")
             dtype = dev.get("type","")
-            # Right side: battery% if known, else device type tag (non-BT only)
             if bat is not None:
                 bc      = P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
                 right_s = f"{bat}%"
@@ -2057,14 +2259,12 @@ def v_network(win, W, H):
 
     bat=sd["bat_pct"]; plug=sd["bat_plug"]
     bc=P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
-    # dynamic Y position based on device list height
     n_devs   = min(len(SD.devices), 14)
     bat_y    = max(16, 3 + n_devs + 2)
     box(win,bat_y,0,7,W-1,"BATTERY & POWER")
     put(win,bat_y+1,2,f"{'+ CHARGING' if plug else '  ON BATTERY'}  {bat}%  system",cp(bc,bold=True))
     hbar(win,bat_y+2,2,W-5,bat,bc)
     put(win,bat_y+3,2,"charging" if plug else f"~{int(bat*1.5)} min remaining",cp(P_DIM))
-    # show BT device battery levels inline
     bt_bats = [(d["name"][:14],d["battery"]) for d in SD.devices
                if d.get("battery") is not None]
     if bt_bats:
@@ -2077,7 +2277,6 @@ def v_network(win, W, H):
     else:
         put(win,bat_y+4,2,f"cpu {sd['cpu']:.0f}%  mem {sd['mem_pct']:.0f}%  disk {sd['disk_pct']:.0f}%",cp(P_DIM))
 
-    # spectrum strip
     vy=24; vis_h=max(2,H-vy-3)
     if vy+vis_h+1<H:
         box(win,vy,0,vis_h+2,W-1,"SPECTRUM")
@@ -2087,13 +2286,13 @@ def v_network(win, W, H):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  VIEW 6 — MUSIC LIBRARY  (add YouTube / local files, manage tracks)
+#  VIEW 6 — MUSIC LIBRARY
 # ══════════════════════════════════════════════════════════════════════════════
 class LibState:
-    cursor   = 0          # selected row in track list
-    mode     = "browse"   # browse | add_url | add_file | confirm_del
-    buf      = ""         # text input buffer
-    msg      = ""         # feedback message (shown 3s)
+    cursor   = 0
+    mode     = "browse"
+    buf      = ""
+    msg      = ""
     msg_time = 0.0
 
 LS = LibState()
@@ -2102,12 +2301,10 @@ def v_library(win, W, H):
     lib = AUDIO.library
     n   = len(lib)
 
-    # ── header ───────────────────────────────────────────────────────────
     centre(win, 1, "MUSIC LIBRARY", cp(P_HI, bold=True)|curses.A_BOLD)
     centre(win, 2, f"{n} track{'s' if n!=1 else ''}  ·  {len(lib)-len(BUILTIN_TRACKS)} user-added",
            cp(P_DIM))
 
-    # ── track list ────────────────────────────────────────────────────────
     list_h  = H - 16
     list_y  = 4
     box(win, list_y, 1, list_h, W-2, "TRACKS  [j/k]=nav  [ENTER]=play  [D]=delete")
@@ -2119,7 +2316,6 @@ def v_library(win, W, H):
         sel = (ri == LS.cursor)
         now = (ri == AUDIO.track_idx)
 
-        # icons
         src = trk.get("source","")
         src_icon = "[B]" if src=="builtin" else "[Y]" if ("youtube" in src or "youtu.be" in src) else "[F]"
         play_sym = "> " if now else "  "
@@ -2138,21 +2334,16 @@ def v_library(win, W, H):
         put(win, ry, 1, " "*(W-3), attr if sel else 0)
         put(win, ry, 1, line[:W-3], attr)
 
-    # scroll indicator
     if n > list_h-2:
         put(win, list_y, W-10, f" {LS.cursor+1}/{n} ", cp(P_DIM))
 
-    # ── status / download message ──────────────────────────────────────────
-    # auto-clear LS.msg after 4s
     if LS.msg and time.time() - LS.msg_time > 4.0:
         LS.msg = ""
-    # auto-clear AUDIO.status_msg after 4s (set msg_time when assigned)
     msg = AUDIO.status_msg or LS.msg
     if msg:
         col = P_RED if "ERROR" in msg else P_GREEN if "Added" in msg else P_AMBER
         centre(win, list_y+list_h, msg[:W-4], cp(col, bold=True))
 
-    # ── input panels ──────────────────────────────────────────────────────
     panel_y = list_y + list_h + 1
     blink   = "_" if int(time.time()*2)%2 else " "
 
@@ -2161,7 +2352,6 @@ def v_library(win, W, H):
         put(win, panel_y+1, 4,
             "Right-click paste (or type) the URL, then ENTER.  ESC = cancel.",
             cp(P_DIM))
-        # show last W-12 chars so end of long URLs is always visible
         disp = LS.buf if len(LS.buf) <= W-12 else "..." + LS.buf[-(W-15):]
         put(win, panel_y+2, 4, (disp + blink)[:W-8], cp(P_AMBER, bold=True))
         put(win, panel_y+3, 4, f"chars: {len(LS.buf)}", cp(P_DIM))
@@ -2188,7 +2378,7 @@ def v_library(win, W, H):
                f"Delete '{trk.get('name','?')[:40]}'?  [Y]=yes  [N/ESC]=cancel",
                cp(P_RED, bold=True))
 
-    else:  # browse mode — show action bar
+    else:
         box(win, panel_y, 2, 4, W-4, "ACTIONS")
         actions = "[Y] Add YouTube URL    [F] Add local file    [D] Delete selected    [ENTER] Play"
         centre(win, panel_y+1, actions[:W-6], cp(P_DIM))
@@ -2211,7 +2401,6 @@ def draw_topbar(win, W):
     put(win,0,1,f" {ts}  {ds}", cp(P_HI)|curses.A_REVERSE)
     vn=f"  {VIEWS[ST.view]}  "
     put(win,0,(W-len(vn))//2,vn, cp(P_HI)|curses.A_REVERSE|curses.A_BOLD)
-    # music note if playing
     if AUDIO.playing:
         td=AUDIO.current
         note_s=f" ~ {td['name'][:20]} "
@@ -2226,22 +2415,16 @@ def draw_navbar(win, W, H):
     put(win,H-2,W-7,"[l →]",cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  INPUT
+#  TEXT INPUT HELPER
 # ══════════════════════════════════════════════════════════════════════════════
 def _text_input(buf, k):
-    """
-    Handle a keypress for a text input field. Returns updated string.
-    Accepts the full printable Unicode range so URLs/paths work correctly.
-    Ctrl+V (22) is silently ignored — paste via right-click in terminal.
-    """
     if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
         return buf[:-1]
-    if k == 23:   # Ctrl+W — delete last word
+    if k == 23:
         parts = buf.rstrip().rsplit(None, 1)
         return parts[0] + " " if len(parts) > 1 else ""
-    if k == 21:   # Ctrl+U — clear line
+    if k == 21:
         return ""
-    # ignore control characters (< 32) and special curses keys (large ints)
     if k < 32 or k > 0x10FFFF:
         return buf
     try:
@@ -2250,38 +2433,28 @@ def _text_input(buf, k):
         return buf
 
 
-# Bracketed paste buffer: some terminals wrap pasted text in ESC[200~ ... ESC[201~
-# curses sees this as a stream of chars; we just accept them all naturally.
-# The user should right-click → Paste in their terminal emulator.
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  VIEW 7 — CALENDAR  (day / week / month  ·  Google Cal & Apple Cal via ICS)
+#  VIEW 7 — CALENDAR
 # ══════════════════════════════════════════════════════════════════════════════
 class CalState:
-    mode      = "week"    # "day" | "week" | "month"
+    mode      = "week"
     date      = datetime.datetime.now().date()
-    # ── add-event form (step-by-step) ──
     add_mode  = False
-    add_step  = 0         # 0=date  1=time  2=title
-    add_date  = None      # datetime.date
+    add_step  = 0
+    add_date  = None
     add_hour  = 9
     add_min   = 0
     add_title = ""
-    # ── delete mode ──
-    del_mode  = False     # confirm-delete overlay open
-    del_idx   = -1        # index into local_evs to delete
-    cur_ev    = 0         # currently selected event index (in day view)
-    # ── ICS sync ──
+    del_mode  = False
+    del_idx   = -1
+    cur_ev    = 0
     ics_mode  = False
     ics_buf   = ""
-    # ── status ──
     msg       = ""
     msg_time  = 0.0
-    local_evs = []        # list of {"dt": "YYYY-MM-DD HH:MM", "title": "..."}
+    local_evs = []
 
 CS = CalState()
-# Load local events
 try:
     with open(CAL_FILE) as _f:
         CS.local_evs = json.load(_f)
@@ -2290,14 +2463,12 @@ except Exception:
 
 
 def _evs_for_day(d):
-    """Return events for date d as list of (start_dt, end_dt, title)."""
     with _CAL_LOCK:
         evs = list(_CAL_EVENTS)
     return [(s, e, t) for s, e, t in evs if s.date() == d]
 
 
 def _evs_for_week(d):
-    """Return events for the ISO week containing d."""
     monday = d - datetime.timedelta(days=d.weekday())
     week   = [monday + datetime.timedelta(days=i) for i in range(7)]
     with _CAL_LOCK:
@@ -2310,13 +2481,11 @@ def _evs_for_week(d):
 
 
 def _evs_for_month(d):
-    """Return (grid of weeks, events dict) for the month of d."""
     import calendar as _cal
     first = d.replace(day=1)
     days_in = _cal.monthrange(d.year, d.month)[1]
     all_days = [first + datetime.timedelta(days=i) for i in range(days_in)]
-    # Pad to full weeks
-    start_pad = first.weekday()   # Mon=0
+    start_pad = first.weekday()
     end_pad   = (7 - (days_in + start_pad) % 7) % 7
     grid = ([None]*start_pad + all_days +
             [first + datetime.timedelta(days=days_in+i) for i in range(end_pad)])
@@ -2337,12 +2506,9 @@ def v_calendar(win, W, H):
     if CS.msg and time.time() - CS.msg_time > 4:
         CS.msg = ""
 
-    # ── Minimal header ────────────────────────────────────────────────────
-    #   MARCH 2026              day  week  month
     month_s = CS.date.strftime("%B %Y").upper()
     put(win, 0, 2, month_s, cp(P_HI, bold=True))
 
-    # Mode tabs — highlight active
     tabs = [("day","1"), ("week","2"), ("month","3")]
     tx = W - 28
     for name, key in tabs:
@@ -2353,10 +2519,8 @@ def v_calendar(win, W, H):
         put(win, 0, tx, lbl, attr)
         tx += len(lbl) + 1
 
-    # Thin separator
     put(win, 1, 0, "─"*W, cp(P_BOX))
 
-    # Bottom hint — single clean line
     hint = " j/k · nav    a · add    d · delete    G · sync    t · today    1/2/3 · day/week/month "
     if CS.msg:
         hcol = P_RED if "ERROR" in CS.msg else P_GREEN
@@ -2364,10 +2528,9 @@ def v_calendar(win, W, H):
     else:
         put(win, H-1, 0, hint[:W], cp(P_DIM))
 
-    CY = 2          # content start row
-    CH = H - 3      # content height
+    CY = 2
+    CH = H - 3
 
-    # ── Input overlays ───────────────────────────────────────────────────
     if CS.add_mode or CS.ics_mode or CS.del_mode:
         blink = "▌" if int(time.time()*2)%2 else " "
         ow = min(W-8, 58); ox = (W-ow)//2; oy = H//2 - 5
@@ -2376,27 +2539,23 @@ def v_calendar(win, W, H):
             try: win.move(r, ox); win.clrtoeol()
             except: pass
 
-        # ── ADD EVENT — 3-field form ──────────────────────────────────────
         if CS.add_mode:
             step = CS.add_step
             put(win, oy,   ox+2, "new event", cp(P_CYAN, bold=True))
             put(win, oy+1, ox+2, "─"*(ow-4),  cp(P_BOX))
 
-            # Field 1: DATE
             d_str = CS.add_date.strftime("%Y-%m-%d") if CS.add_date else CS.date.strftime("%Y-%m-%d")
             f1_attr = (cp(P_AMBER, bold=True) | curses.A_UNDERLINE) if step==0 else cp(P_MID)
             put(win, oy+3, ox+4, "date   ", cp(P_DIM))
             put(win, oy+3, ox+11, d_str, f1_attr)
             if step==0: put(win, oy+3, ox+19, "  ← → day  shift+←→ month  enter→next", cp(P_DIM))
 
-            # Field 2: TIME
             t_str = f"{CS.add_hour:02d}:{CS.add_min:02d}"
             f2_attr = (cp(P_AMBER, bold=True) | curses.A_UNDERLINE) if step==1 else cp(P_MID)
             put(win, oy+5, ox+4, "time   ", cp(P_DIM))
             put(win, oy+5, ox+11, t_str, f2_attr)
             if step==1: put(win, oy+5, ox+17, "  ↑↓ hour  ← → minute  enter→next", cp(P_DIM))
 
-            # Field 3: TITLE
             t_buf  = CS.add_title
             f3_attr = (cp(P_HI, bold=True)) if step==2 else cp(P_MID)
             put(win, oy+7, ox+4, "title  ", cp(P_DIM))
@@ -2412,7 +2571,6 @@ def v_calendar(win, W, H):
                 put(win, oy+10, ox+4, "enter · next field", cp(P_DIM))
             put(win, oy+10, ox+22, "esc · cancel", cp(P_DIM))
 
-        # ── ICS SYNC ──────────────────────────────────────────────────────
         elif CS.ics_mode:
             put(win, oy,   ox+2, "connect calendar", cp(P_CYAN, bold=True))
             put(win, oy+1, ox+2, "─"*(ow-4),         cp(P_BOX))
@@ -2422,7 +2580,6 @@ def v_calendar(win, W, H):
             put(win, oy+8, ox+2, "─"*(ow-4),         cp(P_BOX))
             put(win, oy+9, ox+4, "enter · sync    esc · cancel", cp(P_DIM))
 
-        # ── DELETE CONFIRM ────────────────────────────────────────────────
         elif CS.del_mode:
             ev = CS.local_evs[CS.del_idx] if 0 <= CS.del_idx < len(CS.local_evs) else None
             put(win, oy,   ox+2, "delete event", cp(P_RED, bold=True))
@@ -2434,14 +2591,10 @@ def v_calendar(win, W, H):
             put(win, oy+7, ox+4, "y · confirm delete    n / esc · cancel", cp(P_DIM))
         return
 
-    # ─────────────────────────────────────────────────────────────────────
-    # DAY VIEW  — clean hour timeline
-    # ─────────────────────────────────────────────────────────────────────
     if CS.mode == "day":
         evs      = _evs_for_day(CS.date)
         is_today = (CS.date == today)
 
-        # Date label
         if is_today:
             dlbl = f"  today  ·  {CS.date.strftime('%A, %d %B')}"
             put(win, CY, 0, dlbl, cp(P_AMBER, bold=True))
@@ -2449,7 +2602,6 @@ def v_calendar(win, W, H):
             dlbl = f"  {CS.date.strftime('%A, %d %B %Y')}"
             put(win, CY, 0, dlbl, cp(P_MID))
 
-        # Hour slot height: try to show 7am-10pm in available rows
         FIRST_H, LAST_H = 7, 22
         n_hours  = LAST_H - FIRST_H + 1
         slot_h   = max(1, (CH - 2) // n_hours)
@@ -2461,30 +2613,24 @@ def v_calendar(win, W, H):
             if hy >= CY + CH: break
 
             is_now = is_today and now.hour == hour
-            # Hour label
-            if slot_h > 1 or (hour % 2 == 0):          # skip odd hours if tight
+            if slot_h > 1 or (hour % 2 == 0):
                 hcol = P_AMBER if is_now else P_DIM
                 put(win, hy, time_col, f"{hour:02d}", cp(hcol))
 
-            # Current-time indicator
             if is_now:
                 put(win, hy, ev_col-1, "▶", cp(P_AMBER, bold=True))
 
-            # Hairline
             put(win, hy, ev_col, "·"*2, cp(P_BOX))
 
-            # Events
             hour_evs = [(s,e,t) for s,e,t in evs if s.hour == hour]
             for ei, (s, e, t) in enumerate(hour_evs):
                 ey = hy + ei
                 if ey >= CY + CH: break
-                # global event index across all hours
                 g_idx = evs.index((s,e,t))
                 sel   = (g_idx == CS.cur_ev)
                 upcoming = s >= now
                 ecol  = P_AMBER if sel else (P_CYAN if upcoming else P_DIM)
                 mins  = f":{s.minute:02d}" if s.minute else "   "
-                # mark local-only events with ● so user knows they can delete them
                 is_local = any(
                     lev.get("title") == t and
                     lev.get("dt","").startswith(s.strftime("%Y-%m-%d"))
@@ -2501,21 +2647,16 @@ def v_calendar(win, W, H):
             centre(win, CY+CH//2,   "nothing scheduled", cp(P_DIM))
             centre(win, CY+CH//2+1, "press a to add an event", cp(P_DIM))
 
-    # ─────────────────────────────────────────────────────────────────────
-    # WEEK VIEW  — 7 columns, events stacked per day
-    # ─────────────────────────────────────────────────────────────────────
     elif CS.mode == "week":
         week, ev_map = _evs_for_week(CS.date)
         col_w = (W - 1) // 7
 
-        # Day headers
         for i, d in enumerate(week):
             x    = 1 + i * col_w
             is_t = (d == today)
             name = d.strftime("%a").upper()
             num  = str(d.day)
             if is_t:
-                # Underline today's number
                 put(win, CY,   x, name, cp(P_DIM))
                 put(win, CY+1, x, num,  cp(P_AMBER, bold=True))
                 put(win, CY+2, x, "──", cp(P_AMBER))
@@ -2523,14 +2664,12 @@ def v_calendar(win, W, H):
                 put(win, CY,   x, name, cp(P_DIM))
                 put(win, CY+1, x, num,  cp(P_MID))
 
-        # Vertical column dividers
         for i in range(1, 7):
             x = i * col_w
             for r in range(CY, CY+CH):
                 try: win.addch(r, x, curses.ACS_VLINE, cp(P_BOX))
                 except: pass
 
-        # Events per column
         ev_start_y = CY + 3
         max_ev_rows = CH - 3
         for i, d in enumerate(week):
@@ -2547,20 +2686,15 @@ def v_calendar(win, W, H):
                     ecol = P_MID
                 else:
                     ecol = P_DIM
-                # time + title clipped to column width
                 txt = f"{s.strftime('%H:%M')} {t}"
                 put(win, ry, x, txt[:col_w-1], cp(ecol))
 
-    # ─────────────────────────────────────────────────────────────────────
-    # MONTH VIEW  — clean grid, event dots + first title
-    # ─────────────────────────────────────────────────────────────────────
     elif CS.mode == "month":
         weeks, ev_map = _evs_for_month(CS.date)
         col_w      = (W - 1) // 7
         row_h      = max(2, (CH - 2) // max(1, len(weeks)))
         day_names  = ["MON","TUE","WED","THU","FRI","SAT","SUN"]
 
-        # Weekday header
         for i, dn in enumerate(day_names):
             is_wknd = i >= 5
             put(win, CY, 1+i*col_w, dn, cp(P_DIM if not is_wknd else P_BOX))
@@ -2577,29 +2711,24 @@ def v_calendar(win, W, H):
                 evs    = ev_map.get(d, [])
                 n_ev   = len(evs)
 
-                # Day number styling
                 num = str(d.day)
                 if is_t:
-                    # Today: number + underline accent
                     put(win, wy, x, num, cp(P_AMBER, bold=True))
                     put(win, wy, x+len(num), "▾", cp(P_AMBER))
                 elif is_sel:
                     put(win, wy, x, num, cp(P_CYAN, bold=True))
-                elif di >= 5:  # weekend
+                elif di >= 5:
                     put(win, wy, x, num, cp(P_BOX))
                 else:
                     put(win, wy, x, num, cp(P_MID))
 
-                # Event indicators
                 if n_ev and row_h >= 2:
-                    # Coloured dot count then first title clipped
                     dot_c = P_GREEN if d >= today else P_DIM
                     dots  = "·" * min(n_ev, col_w-4)
                     put(win, wy+1, x, dots[:col_w-2], cp(dot_c))
                     if row_h >= 3 and evs:
                         put(win, wy+2, x, evs[0][:col_w-1], cp(P_DIM))
 
-    # ── No calendar notice ────────────────────────────────────────────────
     with _CAL_LOCK:
         n_total = len(_CAL_EVENTS)
     if n_total == 0 and not CS.add_mode and not CS.ics_mode:
@@ -2609,12 +2738,10 @@ def v_calendar(win, W, H):
 
 
 def _handle_cal_input(k):
-    """Handle all calendar overlay key input (add form, delete confirm, ICS)."""
-    # ── ADD FORM ──────────────────────────────────────────────────────────
     if CS.add_mode:
         step = CS.add_step
 
-        if step == 0:   # DATE field  — arrow keys change day/month
+        if step == 0:
             if k in (10, 13):
                 CS.add_step = 1
             elif k == 27:
@@ -2623,14 +2750,14 @@ def _handle_cal_input(k):
                 CS.add_date = CS.add_date + datetime.timedelta(days=1)
             elif k == curses.KEY_LEFT:
                 CS.add_date = CS.add_date - datetime.timedelta(days=1)
-            elif k == curses.KEY_SR or k == 337:   # Shift+Up → +1 month
+            elif k == curses.KEY_SR or k == 337:
                 import calendar as _c
                 y, m = CS.add_date.year, CS.add_date.month
                 m += 1
                 if m > 12: m, y = 1, y+1
                 d = min(CS.add_date.day, _c.monthrange(y,m)[1])
                 CS.add_date = CS.add_date.replace(year=y, month=m, day=d)
-            elif k == curses.KEY_SF or k == 336:   # Shift+Down → -1 month
+            elif k == curses.KEY_SF or k == 336:
                 import calendar as _c
                 y, m = CS.add_date.year, CS.add_date.month
                 m -= 1
@@ -2638,7 +2765,7 @@ def _handle_cal_input(k):
                 d = min(CS.add_date.day, _c.monthrange(y,m)[1])
                 CS.add_date = CS.add_date.replace(year=y, month=m, day=d)
 
-        elif step == 1:  # TIME field  — up/down = hour, left/right = minute
+        elif step == 1:
             if k in (10, 13):
                 CS.add_step = 2
             elif k == 27:
@@ -2652,7 +2779,7 @@ def _handle_cal_input(k):
             elif k == curses.KEY_LEFT:
                 CS.add_min = (CS.add_min - 5) % 60
 
-        elif step == 2:  # TITLE field  — free text
+        elif step == 2:
             if k in (10, 13):
                 title = CS.add_title.strip() or "Event"
                 dt_str = f"{CS.add_date.strftime('%Y-%m-%d')} {CS.add_hour:02d}:{CS.add_min:02d}"
@@ -2668,7 +2795,6 @@ def _handle_cal_input(k):
             elif 32 <= k <= 126:
                 CS.add_title += chr(k)
 
-    # ── DELETE CONFIRM ────────────────────────────────────────────────────
     elif CS.del_mode:
         if k in (ord('y'), ord('Y')):
             if 0 <= CS.del_idx < len(CS.local_evs):
@@ -2682,7 +2808,6 @@ def _handle_cal_input(k):
         elif k in (ord('n'), ord('N'), 27):
             CS.del_mode = False; CS.del_idx = -1
 
-    # ── ICS SYNC ─────────────────────────────────────────────────────────
     elif CS.ics_mode:
         if k in (10, 13):
             url = CS.ics_buf.strip()
@@ -2700,11 +2825,83 @@ def _handle_cal_input(k):
             CS.ics_buf += chr(k)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIEW 9 — VIDEO PLAYER
+# ══════════════════════════════════════════════════════════════════════════════
+class VidState:
+    mode = "browse"
+    buf  = ""
+    msg  = ""
+    msg_time = 0.0
+
+VS = VidState()
+
+def v_video(win, W, H):
+    if VS.msg and time.time() - VS.msg_time > 5:
+        VS.msg = ""
+
+    put(win, 0, 2, "VIDEO", cp(P_CYAN, bold=True))
+    rname = VIDEO.renderer_name()
+    put(win, 0, 10, f"renderer: {rname}", cp(P_DIM))
+    put(win, 1, 0, "─"*W, cp(P_BOX))
+
+    CY = 2; CH = H - 5
+
+    status_txt = VIDEO.status
+    if status_txt:
+        scol = P_RED if ("error" in status_txt.lower() or "not found" in status_txt.lower()
+                         or "failed" in status_txt.lower()) else P_AMBER
+        centre(win, CY+1, status_txt[:W-4], cp(scol, bold=True))
+
+    if VIDEO.playing:
+        centre(win, CY+3, "▶  NOW PLAYING", cp(P_GREEN, bold=True))
+        centre(win, CY+4, VIDEO.title, cp(P_HI, bold=True))
+        centre(win, CY+6, "playing in a separate window  ·  press S to stop", cp(P_DIM))
+    elif not VIDEO.status:
+        mid = CY + CH//2 - 3
+        if not VIDEO.has_renderer():
+            centre(win, mid,   "no video player found", cp(P_RED, bold=True))
+            centre(win, mid+1, "auto-installing mpv in background...", cp(P_AMBER))
+            centre(win, mid+2, "or: winget install mpv  /  brew install mpv", cp(P_DIM))
+        else:
+            centre(win, mid,   f"player ready: {VIDEO.renderer_name()}", cp(P_GREEN))
+            centre(win, mid+2, "Y · YouTube URL    O · open file", cp(P_DIM))
+
+    blink = "▌" if int(time.time()*2)%2 else " "
+    if VS.mode in ("add_url", "add_file"):
+        ow = min(W-8, 64); ox = (W-ow)//2; oy = H//2 - 4
+        for r in range(oy, oy+9):
+            try: win.move(r, ox); win.clrtoeol()
+            except: pass
+        label = "play youtube url" if VS.mode == "add_url" else "open video file"
+        put(win, oy,   ox+2, label,           cp(P_CYAN, bold=True))
+        put(win, oy+1, ox+2, "─"*(ow-4),      cp(P_BOX))
+        if VS.mode == "add_url":
+            put(win, oy+2, ox+2, "youtube.com/watch?v=...  or  youtu.be/...", cp(P_DIM))
+        else:
+            put(win, oy+2, ox+2, "full path to video file  (mp4 mkv avi mov webm)", cp(P_DIM))
+        put(win, oy+4, ox+2, f"{VS.buf}{blink}", cp(P_HI, bold=True))
+        put(win, oy+6, ox+2, "─"*(ow-4), cp(P_BOX))
+        put(win, oy+7, ox+2, "enter · play    esc · cancel", cp(P_DIM))
+
+    if VS.msg:
+        mcol = P_RED if "error" in VS.msg.lower() else P_GREEN
+        put(win, H-2, 2, VS.msg[:W-4], cp(mcol, bold=True))
+
+    put(win, H-1, 0,
+        " O · open file    Y · YouTube    S · stop    ←→ · views ",
+        cp(P_DIM))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  INPUT HANDLER  (all key routing lives here)
+# ══════════════════════════════════════════════════════════════════════════════
 def handle_key(k):
     v = ST.view
 
-    # ── TEXT INPUT MODES — consume ALL keys, no globals ──────────────────
-    # Todo add mode
+    # ── 1. TEXT INPUT MODES — consume ALL keys, no fall-through ──────────
+
+    # Todo add
     if ST.todo_add:
         if k in (10, 13):
             t = ST.todo_buf.strip()
@@ -2719,14 +2916,14 @@ def handle_key(k):
             ST.todo_buf = ""
         else:
             ST.todo_buf = _text_input(ST.todo_buf, k)
-        return  # swallow everything while typing
+        return
 
-    # Calendar input modes — consume ALL keys before global nav
+    # Calendar overlays
     if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode):
         _handle_cal_input(k)
         return
 
-    # Library text input mode — must check BEFORE global nav
+    # Library text input
     if v == 5 and LS.mode in ("add_url", "add_file"):
         if k in (10, 13):
             t = LS.buf.strip()
@@ -2735,40 +2932,58 @@ def handle_key(k):
                     AUDIO.add_youtube(t)
                 else:
                     ok, msg = AUDIO.add_file(t)
-                    LS.msg = msg
-                    LS.msg_time = time.time()
-            LS.mode = "browse"
-            LS.buf  = ""
+                    LS.msg = msg; LS.msg_time = time.time()
+            LS.mode = "browse"; LS.buf = ""
         elif k == 27:
-            LS.mode = "browse"
-            LS.buf  = ""
+            LS.mode = "browse"; LS.buf = ""
         else:
             LS.buf = _text_input(LS.buf, k)
-        return  # swallow everything while typing
+        return
 
-    # ── GLOBAL NAV (only when NOT in text-input mode) ────────────────────
+    # Video text input
+    if v == 7 and VS.mode in ("add_url", "add_file"):
+        if k in (10, 13):
+            src = VS.buf.strip()
+            if src:
+                if VS.mode == "add_url":
+                    VIDEO.play_youtube(src)
+                    VS.msg = "loading stream..."; VS.msg_time = time.time()
+                else:
+                    if os.path.exists(src):
+                        VIDEO.play(src)
+                        VS.msg = f"playing: {os.path.basename(src)[:30]}"
+                    else:
+                        VS.msg = "file not found"; VS.msg_time = time.time()
+            VS.mode = "browse"; VS.buf = ""
+        elif k == 27:
+            VS.mode = "browse"; VS.buf = ""
+        elif k in (curses.KEY_BACKSPACE, 127, 8):
+            VS.buf = VS.buf[:-1]
+        elif 32 <= k <= 126:
+            VS.buf += chr(k)
+        return
+
+    # ── 2. GLOBAL NAV ─────────────────────────────────────────────────────
     if k in (curses.KEY_RIGHT, ord('l'), 9):
-        ST.view = (v + 1) % len(VIEWS)
-        return
+        ST.view = (v + 1) % len(VIEWS); return
     if k in (curses.KEY_LEFT, ord('h')):
-        ST.view = (v - 1) % len(VIEWS)
-        return
+        ST.view = (v - 1) % len(VIEWS); return
 
-    # ── GLOBAL MUSIC CONTROLS (all views except dashboard where space=todo) ─
-    if k == ord(' ') and v != 0:  AUDIO.toggle_play(); return
-    if k == ord('z'):  AUDIO.prev_track();  return
-    if k == ord('x'):  AUDIO.next_track();  return
-    if k == ord('s') and v != 2:  AUDIO.shuffle = not AUDIO.shuffle; return
-    if k == ord('R'):  AUDIO.repeat = not AUDIO.repeat; return
+    # ── 3. GLOBAL MUSIC CONTROLS ──────────────────────────────────────────
+    if k == ord(' ') and v != 0: AUDIO.toggle_play(); return
+    if k == ord('z'):             AUDIO.prev_track();  return
+    if k == ord('x'):             AUDIO.next_track();  return
+    if k == ord('s') and v != 2: AUDIO.shuffle = not AUDIO.shuffle; return
+    if k == ord('R'):             AUDIO.repeat = not AUDIO.repeat;   return
 
-    # ── VIEW-SPECIFIC ─────────────────────────────────────────────────────
-    if v == 0:  # dashboard
+    # ── 4. VIEW-SPECIFIC ──────────────────────────────────────────────────
+    if v == 0:   # Dashboard
         if k in (curses.KEY_UP,   ord('k')): ST.todo_cur = max(0, ST.todo_cur - 1)
         elif k in (curses.KEY_DOWN, ord('j')): ST.todo_cur = min(len(ST.todos)-1, ST.todo_cur+1)
-        elif k in (10, 13) and ST.todos:     # ENTER = tick/untick todo
+        elif k in (10, 13) and ST.todos:
             ST.todos[ST.todo_cur][0] ^= True
             save_todos(ST.todos)
-        elif k == ord(' '):  AUDIO.toggle_play()  # space still plays music
+        elif k == ord(' '):  AUDIO.toggle_play()
         elif k == ord('a'): ST.todo_add = True; ST.todo_buf = ""
         elif k == ord('d') and ST.todos:
             ST.todos.pop(ST.todo_cur)
@@ -2777,18 +2992,17 @@ def handle_key(k):
         elif k == ord('p'): ST.pomo_run = not ST.pomo_run; ST._pw = time.time()
         elif k == ord('r'): ST.pomo_run = False; ST.pomo_secs = ST.pomo_total; ST._pw = time.time()
 
-    elif v == 2:  # focus
+    elif v == 2:  # Focus
         if k == ord('p'):   ST.pomo_run = not ST.pomo_run; ST._pw = time.time()
         elif k == ord('r'): ST.pomo_run = False; ST.pomo_secs = ST.pomo_total; ST._pw = time.time()
         elif k == ord('s'):
             ST.pomo_run   = False
             ST.pomo_phase = "BREAK" if ST.pomo_phase == "WORK" else "WORK"
             ST.pomo_total = 5*60.0 if ST.pomo_phase == "BREAK" else 25*60.0
-            ST.pomo_secs  = ST.pomo_total
-            ST._pw        = time.time()
+            ST.pomo_secs  = ST.pomo_total; ST._pw = time.time()
         elif k == ord('f'): ST.focus_idx = (ST.focus_idx+1) % len(ST.focus_modes)
 
-    elif v == 5:  # library browse mode (add_url/add_file handled above)
+    elif v == 5:  # Library
         if LS.mode == "browse":
             if k in (curses.KEY_UP,   ord('k')): LS.cursor = max(0, LS.cursor-1)
             elif k in (curses.KEY_DOWN, ord('j')): LS.cursor = min(len(AUDIO.library)-1, LS.cursor+1)
@@ -2799,114 +3013,135 @@ def handle_key(k):
                 if LS.cursor >= len(BUILTIN_TRACKS):
                     LS.mode = "confirm_del"
                 else:
-                    LS.msg = "Cannot remove built-in tracks"
-                    LS.msg_time = time.time()
+                    LS.msg = "Cannot remove built-in tracks"; LS.msg_time = time.time()
         elif LS.mode == "confirm_del":
             if k in (ord('y'), ord('Y')):
                 ok, msg = AUDIO.remove_track(LS.cursor)
-                LS.msg      = msg
-                LS.msg_time = time.time()
-                LS.cursor   = max(0, min(LS.cursor, len(AUDIO.library)-1))
-                LS.mode     = "browse"
+                LS.msg = msg; LS.msg_time = time.time()
+                LS.cursor = max(0, min(LS.cursor, len(AUDIO.library)-1))
+                LS.mode   = "browse"
             elif k in (ord('n'), ord('N'), 27):
                 LS.mode = "browse"
 
-    elif v == 6:  # calendar navigation (input modes handled above)
+    elif v == 6:  # Calendar
         if k == ord('1'):   CS.mode = "day"
         elif k == ord('2'): CS.mode = "week"
         elif k == ord('3'): CS.mode = "month"
         elif k in (ord('j'), curses.KEY_DOWN):
             if CS.mode == "day":
-                # Move event cursor in day view if events exist
                 evs = _evs_for_day(CS.date)
-                if evs:
-                    CS.cur_ev = (CS.cur_ev + 1) % len(evs)
-                else:
-                    CS.date += datetime.timedelta(days=1)
+                if evs: CS.cur_ev = (CS.cur_ev + 1) % len(evs)
+                else:   CS.date += datetime.timedelta(days=1)
             else:
                 step = 7 if CS.mode=="week" else 28
                 CS.date += datetime.timedelta(days=step)
         elif k in (ord('k'), curses.KEY_UP):
             if CS.mode == "day":
                 evs = _evs_for_day(CS.date)
-                if evs:
-                    CS.cur_ev = (CS.cur_ev - 1) % len(evs)
-                else:
-                    CS.date -= datetime.timedelta(days=1)
+                if evs: CS.cur_ev = (CS.cur_ev - 1) % len(evs)
+                else:   CS.date -= datetime.timedelta(days=1)
             else:
                 step = 7 if CS.mode=="week" else 28
                 CS.date -= datetime.timedelta(days=step)
         elif k in (curses.KEY_RIGHT, curses.KEY_LEFT) and CS.mode != "day":
-            # left/right navigate days in week/month view
             CS.date += datetime.timedelta(days=1 if k==curses.KEY_RIGHT else -1)
         elif k == ord('t'):
-            CS.date  = datetime.datetime.now().date()
-            CS.cur_ev = 0
+            CS.date = datetime.datetime.now().date(); CS.cur_ev = 0
         elif k == ord('a'):
-            # Open structured add form
-            CS.add_mode  = True
-            CS.add_step  = 0
-            CS.add_date  = CS.date
-            CS.add_hour  = 9
-            CS.add_min   = 0
-            CS.add_title = ""
+            CS.add_mode = True; CS.add_step = 0
+            CS.add_date = CS.date; CS.add_hour = 9
+            CS.add_min  = 0;       CS.add_title = ""
         elif k == ord('d'):
-            # Delete: only local events, cursor must be on one
             evs = _evs_for_day(CS.date)
             if evs and 0 <= CS.cur_ev < len(evs):
                 s, e, t = evs[CS.cur_ev]
-                # find matching local event
                 for li, lev in enumerate(CS.local_evs):
                     if (lev.get("title") == t and
                             lev.get("dt","").startswith(s.strftime("%Y-%m-%d"))):
-                        CS.del_idx  = li
-                        CS.del_mode = True
-                        break
+                        CS.del_idx = li; CS.del_mode = True; break
                 else:
-                    CS.msg      = "ICS events cannot be deleted here"
-                    CS.msg_time = time.time()
+                    CS.msg = "ICS events cannot be deleted here"; CS.msg_time = time.time()
         elif k == ord('G'):
             CS.ics_mode = True; CS.ics_buf = ""
         elif k == ord('r'):
             threading.Thread(target=refresh_calendar, daemon=True).start()
             CS.msg = "Refreshing..."; CS.msg_time = time.time()
 
+    elif v == 7:  # Video
+        if k == ord('Y'):   VS.mode = "add_url";  VS.buf = ""
+        elif k == ord('O'): VS.mode = "add_file"; VS.buf = ""
+        elif k == ord('S'):
+            VIDEO.stop()
+            VS.msg = "stopped"; VS.msg_time = time.time()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
-VIEW_FNS=[v_dashboard,v_clock,v_focus,v_neofetch,v_network,v_library,v_calendar]
+VIEW_FNS = [v_dashboard, v_clock, v_focus, v_neofetch, v_network,
+            v_library, v_calendar, v_video]
+
+def _in_text_input_mode():
+    """Return True whenever a text-entry overlay is consuming all keys."""
+    v = ST.view
+    if ST.todo_add:                                              return True
+    if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode):  return True
+    if v == 5 and LS.mode in ("add_url", "add_file"):            return True
+    if v == 7 and VS.mode in ("add_url", "add_file"):            return True
+    return False
+
 
 def main(stdscr):
+    # Zero ESC delay so pasted text containing 0x1b bytes doesn't stall.
+    os.environ["ESCDELAY"] = "0"
+
     curses.curs_set(0)
     stdscr.nodelay(True)
-    stdscr.timeout(50)   # 20fps, fast enough for paste
-    stdscr.keypad(True)  # enable special keys properly
+    stdscr.timeout(50)
+    stdscr.keypad(True)
     init_colors()
 
-    # Audio starts paused; user presses SPACE to begin
     if not AUDIO._backend:
         AUDIO.playing = False
 
     while True:
         stdscr.erase()
-        H,W=stdscr.getmaxyx()
-        if H<24 or W<72:
-            put(stdscr,H//2,max(0,(W-44)//2),
+        H, W = stdscr.getmaxyx()
+        if H < 24 or W < 72:
+            put(stdscr, H//2, max(0,(W-44)//2),
                 f"  Terminal too small ({W}x{H}) — need 72x24+  ",
-                cp(P_RED,bold=True))
+                cp(P_RED, bold=True))
             stdscr.refresh()
-            if stdscr.getch()==ord('q'): break
+            if stdscr.getch() == ord('q'): break
             continue
-        tick()
-        draw_topbar(stdscr,W)
-        VIEW_FNS[ST.view](stdscr,W,H)
-        draw_navbar(stdscr,W,H)
-        stdscr.refresh()
-        k=stdscr.getch()
-        if k==ord('q'): break
-        if k!=-1: handle_key(k)
 
-if __name__=="__main__":
+        tick()
+        draw_topbar(stdscr, W)
+        VIEW_FNS[ST.view](stdscr, W, H)
+        draw_navbar(stdscr, W, H)
+        stdscr.refresh()
+
+        # Drain ALL pending keypresses each frame.
+        # Terminals deliver pasted text as a rapid burst — reading only one
+        # key per 50 ms frame means a 32-char Client ID takes 1.6 s to land.
+        # We read up to 256 chars per frame when a text overlay is open so
+        # the whole paste is consumed in one go.
+        in_text = _in_text_input_mode()
+        max_keys = 256 if in_text else 8
+        for _ in range(max_keys):
+            k = stdscr.getch()
+            if k == -1:
+                break
+            if k == ord('q') and not in_text:
+                AUDIO._kill()
+                save_todos(ST.todos)
+                return
+            handle_key(k)
+            # Re-check text mode after each key (an Enter may close the overlay)
+            in_text = _in_text_input_mode()
+
+
+if __name__ == "__main__":
     backend = AUDIO._backend or ""
     if not backend:
         print("""
