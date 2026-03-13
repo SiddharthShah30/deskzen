@@ -1,9 +1,9 @@
 # 🖥️ Terminal StandBy
 
-> An Apple-style standby mode for your terminal — ambient music, live spectrum visualizer, system stats, focus tools, real device monitoring, and a full calendar. All in one beautiful TUI.
+> An Apple-style standby mode for your terminal — ambient music, live spectrum visualizer, system stats, focus tools, real device monitoring, a full calendar, and video playback. All in one beautiful TUI.
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)
-![Version](https://img.shields.io/badge/Version-v4-blueviolet)
+![Version](https://img.shields.io/badge/Version-v3-blueviolet)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -29,12 +29,13 @@
 | 1 | **Dashboard** | System overview, todos, pomodoro timer, spectrum visualizer |
 | 2 | **Clock + Music** | Full-screen clock, now-playing panel, spectrum visualizer |
 | 3 | **Focus** | Pomodoro timer with work/break phases and focus modes |
-| 4 | **Neofetch** | System info panel — OS, CPU, GPU, RAM, uptime, and more |
+| 4 | **Neofetch** | Animated Pac-Man logo, system info panel — OS, CPU, GPU, RAM, uptime, and more |
 | 5 | **Network** | Live bandwidth stats, real connected device list with battery % |
 | 6 | **Library** | Browse, add, and manage your music library |
-| 7 | **Calendar** ⭐ new | Day, Week, and Month views with Google & Apple Calendar sync |
+| 7 | **Calendar** | Day, Week, and Month views with Google & Apple Calendar sync |
+| 8 | **Video** | Play local video files or stream YouTube via mpv/ffplay |
 
-### 🗓️ Calendar View (new in v4)
+### 🗓️ Calendar View
 A full calendar built into the terminal:
 - **Three view modes** — Day, Week, and Month, toggled with `1` / `2` / `3`
 - **Google Calendar sync** — paste your secret ICS URL and hit `G` to sync
@@ -43,6 +44,13 @@ A full calendar built into the terminal:
 - **Delete events** — remove local events with a confirmation prompt
 - **Today indicator** — current hour highlighted with a live `▶` marker in Day view
 - Events are colour-coded: upcoming in cyan, selected in amber, past events dimmed
+
+### 🎬 Video View
+Play video directly from Terminal StandBy:
+- **Local file playback** — open any video file by path (`O`)
+- **YouTube streaming** — stream YouTube videos via `yt-dlp` without downloading (`Y`)
+- **Auto-installs mpv** — detects and installs mpv automatically; falls back to `ffplay`
+- Video plays in a separate window launched by the renderer
 
 ### 📡 Real Device Monitoring
 The Network view scans and displays **actually connected** devices — not built-in or virtual ones:
@@ -55,6 +63,7 @@ The Network view scans and displays **actually connected** devices — not built
 
 ### 🌈 Other Highlights
 - Live **CAVA-style spectrum visualizer** reacts to the current ambient genre
+- Animated **Pac-Man logo** in the Neofetch view
 - **Pomodoro timer** with Work / Break phases (25 min / 5 min)
 - Persistent **todo list** saved between sessions
 - Full **256-color** terminal UI with clean box-drawing characters
@@ -77,7 +86,7 @@ The Network view scans and displays **actually connected** devices — not built
 ```
 pip install psutil        # real CPU, RAM, battery, and network stats
 pip install sounddevice   # best audio backend — gapless, auto-installed on first run
-pip install yt-dlp        # add YouTube tracks to your library
+pip install yt-dlp        # add YouTube tracks to your library, or stream YouTube video
 pip install windows-curses  # Windows only — auto-installed on first run
 ```
 
@@ -139,7 +148,8 @@ Events sync on demand — press `G` at any time to refresh.
 | `↓` / `j` | Move todo cursor down |
 | `a` | Add new todo item |
 | `d` | Delete selected todo |
-| `Space` | Toggle todo complete |
+| `Enter` | Toggle todo complete |
+| `Space` | Play / Pause music |
 | `p` | Start / pause pomodoro |
 | `r` | Reset pomodoro |
 
@@ -155,10 +165,11 @@ Events sync on demand — press `G` at any time to refresh.
 | Key | Action |
 |-----|--------|
 | `1` / `2` / `3` | Switch Day / Week / Month view |
-| `j` / `k` | Navigate events or days |
+| `j` / `k` | Navigate events (Day) or weeks/months |
 | `a` | Add a new event |
 | `d` | Delete selected event |
 | `G` | Sync from Google / Apple Calendar (ICS) |
+| `r` | Refresh calendar |
 | `t` | Jump to today |
 
 ### Library View
@@ -170,6 +181,13 @@ Events sync on demand — press `G` at any time to refresh.
 | `F` | Add local file path |
 | `D` | Delete selected track |
 
+### Video View
+| Key | Action |
+|-----|--------|
+| `Y` | Play a YouTube URL |
+| `O` | Open a local video file |
+| `S` | Stop playback |
+
 ---
 
 ## 📁 File Structure
@@ -180,7 +198,8 @@ terminal-standby/
 ├── ~/.terminal_standby_music.json     # Saved music library (auto-created)
 ├── ~/.terminal_standby_cache/         # Downloaded YouTube audio cache
 ├── ~/.terminal_standby.ics            # Apple/Google Calendar ICS file
-└── ~/.terminal_standby_events.json    # Manually added local events
+├── ~/.terminal_standby_cal.json       # Manually added local calendar events
+└── ~/.terminal_standby_todos.json     # Persistent todo list
 ```
 
 ---
@@ -202,9 +221,9 @@ Install [FFmpeg](https://ffmpeg.org/download.html) alongside `sounddevice` for t
 
 ## 🚧 Roadmap
 
-### Coming in v5
+### Coming Soon
 - [ ] **Spotify integration** — connect your Spotify account and control playback from the terminal
-- [ ] **In-terminal video playback** — play videos directly inside the TUI
+- [ ] **In-terminal ASCII video rendering** — render video frames directly inside the TUI (currently plays in a separate window)
 
 ### Known Issues
 - [ ] Brown Noise and Pink Noise volume levels can be uncomfortably loud — softening pass in progress
