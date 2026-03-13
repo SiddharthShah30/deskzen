@@ -90,6 +90,105 @@ def kbfmt(k):
     return f"{k/1024:.1f}MB/s" if k > 1024 else f"{k:.0f}KB/s"
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  PAC-MAN LOGO ANIMATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Pac-Man open / closed mouth frames (5 rows tall, 7 cols wide)
+_PAC_OPEN = [
+    " ████ ",
+    "██████",
+    "███   ",
+    "██████",
+    " ████ ",
+]
+_PAC_CLOSED = [
+    " ████ ",
+    "██████",
+    "██████",
+    "██████",
+    " ████ ",
+]
+
+# Ghost (5 rows, 6 cols)
+_GHOST = [
+    " ████ ",
+    "██████",
+    "██ ██ ",   # eyes as spaces
+    "██████",
+    "█ ██ █",   # wavy bottom
+]
+
+# The track width matches LOGO_W = 26, minus 2 padding = 24 usable chars
+_TRACK_W = 22   # dots track width (chars)
+_DOT     = "·"
+_PELLET  = "●"
+
+def draw_animated_logo(win, y, x, t):
+    """Pac-Man eats dots across the logo area. Returns height used."""
+    W_LOGO = 24   # total logo column width available
+
+    # --- animation state derived from time ---
+    speed   = 4.0                          # chars per second
+    cycle   = _TRACK_W / speed            # seconds for one full pass
+    pos_f   = (t * speed) % _TRACK_W      # pacman x position (float, 0..TRACK_W)
+    pos     = int(pos_f)
+    mouth_open = int(t * 8) % 2 == 0      # mouth flaps 4 Hz
+
+    # ghost lags behind pacman by 6 chars (wraps)
+    ghost_pos = int((pos_f - 7) % _TRACK_W)
+
+    # --- choose pac frame ---
+    pac_frame  = _PAC_OPEN if mouth_open else _PAC_CLOSED
+
+    # --- title rows ---
+    put(win, y,   x, "  TERMINAL STANDBY  v3", cp(P_DIM))
+    put(win, y+1, x, "  " + "─" * (W_LOGO - 4), cp(P_BOX))
+
+    # --- pac-man rows (5 rows) ---
+    PAC_Y = y + 2
+    for row in range(5):
+        # build the track line
+        track = list(" " * _TRACK_W)
+
+        # place dots — only ahead of pacman
+        for col in range(_TRACK_W):
+            is_pellet = (col % 7 == 3)
+            if col > pos + 6:          # not yet eaten
+                track[col] = _PELLET if is_pellet else _DOT
+
+        # place ghost (overwrite track chars in ghost columns)
+        # ghost is 6 wide, drawn only if it fits
+        gx = ghost_pos
+        if 0 <= gx < _TRACK_W:
+            ghost_line = _GHOST[row]
+            for ci, ch in enumerate(ghost_line):
+                ti = gx + ci
+                if 0 <= ti < _TRACK_W:
+                    track[ti] = ch
+
+        # place pac-man (7 wide, drawn last so it wins)
+        pac_line = pac_frame[row]
+        for ci, ch in enumerate(pac_line):
+            ti = pos + ci
+            if 0 <= ti < _TRACK_W:
+                track[ti] = ch
+
+        track_str = "".join(track)
+
+        # draw: leading indent, then track
+        put(win, PAC_Y + row, x + 1, track_str, cp(P_AMBER, bold=True))
+
+        # ghost eyes — bright overlay
+        for ci, ch in enumerate(_GHOST[row]):
+            ti = ghost_pos + ci
+            if 0 <= ti < _TRACK_W and ch == " " and row == 2:
+                # these spaces are the eyes — make them cyan
+                put(win, PAC_Y + row, x + 1 + ti, "●", cp(P_CYAN, bold=True))
+
+    return PAC_Y - y + 5   # total rows used
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  AUDIO ENGINE  –  procedural synth → ffplay / afplay / Windows WAVE
 # ══════════════════════════════════════════════════════════════════════════════
 SR    = 44100
@@ -1328,7 +1427,7 @@ VIDEO = VideoPlayer()
 AUDIO = AudioEngine()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SYSTEM DATA
+#  SYSTEM DATA  –  FIXED VERSION
 # ══════════════════════════════════════════════════════════════════════════════
 class SysData:
     def __init__(self):
@@ -1346,25 +1445,47 @@ class SysData:
         self.ssid      = self._ssid()
         self.local_ip  = self._local_ip()
         self.cpu_cores = os.cpu_count() or 1
+        self.shell     = self._shell()
+        self.de_wm     = self._de_wm()
+        self.resolution = "N/A"
         self._pnet     = None
         self._boot     = psutil.boot_time() if HAS_PSUTIL else time.time()
         self.devices       = []
         self._dev_last     = 0.0
         self._dev_scanning = False
+        # Package count + resolution cached separately (slow)
+        self.pkg_count = "…"
+        threading.Thread(target=self._fetch_pkg_count, daemon=True).start()
+        threading.Thread(target=self._fetch_resolution, daemon=True).start()
 
     @staticmethod
     def _os():
         s = platform.system()
         if s == "Darwin":
             v = platform.mac_ver()[0]; return f"macOS {v}"
-        if s == "Windows": return f"Windows {platform.version()[:22]}"
+        if s == "Windows":
+            # Detect Windows 10 vs 11 properly from build number
+            try:
+                build = int(platform.version().split(".")[-1])
+                major = int(platform.version().split(".")[0])
+                if major >= 10 and build >= 22000:
+                    return "Windows 11"
+                elif major >= 10:
+                    return "Windows 10"
+                else:
+                    return f"Windows {major}"
+            except Exception:
+                return "Windows"
+        # Linux: read from /etc/os-release
         try:
-            for f in ["/etc/os-release","/etc/lsb-release"]:
-                if os.path.exists(f):
-                    for line in open(f):
-                        if line.startswith("PRETTY_NAME="):
-                            return line.split("=",1)[1].strip().strip('"')[:28]
-        except: pass
+            for fpath in ["/etc/os-release", "/etc/lsb-release"]:
+                if os.path.exists(fpath):
+                    with open(fpath) as f:
+                        for line in f:
+                            if line.startswith("PRETTY_NAME="):
+                                return line.split("=",1)[1].strip().strip('"')[:28]
+        except Exception:
+            pass
         return f"Linux {platform.release()[:20]}"
 
     @staticmethod
@@ -1372,43 +1493,47 @@ class SysData:
         try:
             if platform.system() == "Darwin":
                 r = subprocess.run(["sysctl","-n","machdep.cpu.brand_string"],
-                                   capture_output=True,text=True,timeout=1)
-                return r.stdout.strip()[:34]
+                                   capture_output=True, text=True, timeout=2)
+                v = r.stdout.strip()
+                if v: return v[:36]
             if platform.system() == "Linux":
-                for line in open("/proc/cpuinfo"):
-                    if "model name" in line:
-                        return line.split(":",1)[1].strip()[:34]
+                with open("/proc/cpuinfo") as f:
+                    for line in f:
+                        if "model name" in line:
+                            return line.split(":",1)[1].strip()[:36]
             if platform.system() == "Windows":
                 r = subprocess.run(["wmic","cpu","get","name","/value"],
-                                   capture_output=True,text=True,timeout=2)
+                                   capture_output=True, text=True, timeout=3)
                 for line in r.stdout.splitlines():
                     if "Name=" in line:
-                        return line.split("=",1)[1].strip()[:34]
-        except: pass
-        return platform.processor()[:34] or "Unknown CPU"
+                        return line.split("=",1)[1].strip()[:36]
+        except Exception:
+            pass
+        return platform.processor()[:36] or "Unknown CPU"
 
     @staticmethod
     def _gpu():
         try:
             if platform.system() == "Darwin":
                 r = subprocess.run(["system_profiler","SPDisplaysDataType"],
-                                   capture_output=True,text=True,timeout=3)
+                                   capture_output=True, text=True, timeout=4)
                 for line in r.stdout.splitlines():
                     if "Chipset Model" in line or "Chip" in line:
-                        return line.split(":",1)[1].strip()[:30]
+                        return line.split(":",1)[1].strip()[:32]
             if platform.system() == "Linux":
-                r = subprocess.run(["lspci"],capture_output=True,text=True,timeout=2)
+                r = subprocess.run(["lspci"], capture_output=True, text=True, timeout=3)
                 for line in r.stdout.splitlines():
                     if "VGA" in line or "3D" in line:
-                        return line.split(":",2)[-1].strip()[:30]
+                        return line.split(":",2)[-1].strip()[:32]
             if platform.system() == "Windows":
                 r = subprocess.run(["wmic","path","win32_VideoController",
                                     "get","name","/value"],
-                                   capture_output=True,text=True,timeout=2)
+                                   capture_output=True, text=True, timeout=3)
                 for line in r.stdout.splitlines():
                     if "Name=" in line:
-                        return line.split("=",1)[1].strip()[:30]
-        except: pass
+                        return line.split("=",1)[1].strip()[:32]
+        except Exception:
+            pass
         return "N/A"
 
     @staticmethod
@@ -1418,20 +1543,30 @@ class SysData:
                 r = subprocess.run(["/System/Library/PrivateFrameworks/"
                                     "Apple80211.framework/Versions/Current/"
                                     "Resources/airport","-I"],
-                                   capture_output=True,text=True,timeout=2)
+                                   capture_output=True, text=True, timeout=2)
                 for line in r.stdout.splitlines():
                     if " SSID:" in line and "BSSID" not in line:
                         return line.split(":",1)[1].strip()
             if platform.system() == "Linux":
-                r = subprocess.run(["iwgetid","-r"],capture_output=True,text=True,timeout=2)
-                return r.stdout.strip() or "N/A"
+                r = subprocess.run(["iwgetid","-r"],
+                                   capture_output=True, text=True, timeout=2)
+                v = r.stdout.strip()
+                if v: return v
+                # Fallback: nmcli
+                r2 = subprocess.run(
+                    ["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"],
+                    capture_output=True, text=True, timeout=2)
+                for line in r2.stdout.splitlines():
+                    if line.startswith("yes:"):
+                        return line.split(":",1)[1].strip()
             if platform.system() == "Windows":
                 r = subprocess.run(["netsh","wlan","show","interfaces"],
-                                   capture_output=True,text=True,timeout=2)
+                                   capture_output=True, text=True, timeout=2)
                 for line in r.stdout.splitlines():
                     if "SSID" in line and "BSSID" not in line:
                         return line.split(":",1)[1].strip()
-        except: pass
+        except Exception:
+            pass
         return "N/A"
 
     @staticmethod
@@ -1440,7 +1575,193 @@ class SysData:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close()
             return ip
-        except: return "127.0.0.1"
+        except Exception:
+            return "127.0.0.1"
+
+    @staticmethod
+    def _shell():
+        sys_name = platform.system()
+        if sys_name == "Windows":
+            # Check if running inside PowerShell
+            ppid_name = ""
+            try:
+                if HAS_PSUTIL:
+                    import psutil as _ps
+                    p = _ps.Process(os.getpid())
+                    ppid_name = _ps.Process(p.ppid()).name().lower()
+            except Exception:
+                pass
+            if "powershell" in ppid_name or "pwsh" in ppid_name:
+                # Get version
+                try:
+                    r = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+                        capture_output=True, text=True, timeout=3)
+                    v = r.stdout.strip()
+                    return f"PowerShell {v}" if v else "PowerShell"
+                except Exception:
+                    return "PowerShell"
+            if "cmd" in ppid_name:
+                return "cmd.exe"
+            return os.environ.get("COMSPEC", "cmd.exe").split("\\")[-1]
+        # Unix
+        shell_path = os.environ.get("SHELL", "")
+        if shell_path:
+            name = shell_path.split("/")[-1]
+            try:
+                r = subprocess.run([shell_path, "--version"],
+                                   capture_output=True, text=True, timeout=2)
+                first = r.stdout.splitlines()[0] if r.stdout else ""
+                # Extract version number
+                import re
+                m = re.search(r"[\d]+\.[\d]+[\.\d]*", first)
+                if m:
+                    return f"{name} {m.group()}"
+            except Exception:
+                pass
+            return name
+        return "unknown"
+
+    @staticmethod
+    def _de_wm():
+        sys_name = platform.system()
+        if sys_name == "Windows":
+            # Windows always uses DWM (Desktop Window Manager)
+            return "DWM"
+        if sys_name == "Darwin":
+            return "Quartz Compositor"
+        # Linux – check common env vars
+        de = (os.environ.get("XDG_CURRENT_DESKTOP") or
+              os.environ.get("DESKTOP_SESSION") or
+              os.environ.get("GDMSESSION") or "")
+        wm = os.environ.get("WINDOW_MANAGER", "")
+        if de and wm:
+            return f"{de} / {wm}"
+        if de:
+            return de
+        if wm:
+            return wm
+        # Try wmctrl
+        try:
+            r = subprocess.run(["wmctrl", "-m"], capture_output=True, text=True, timeout=2)
+            for line in r.stdout.splitlines():
+                if line.startswith("Name:"):
+                    return line.split(":",1)[1].strip()
+        except Exception:
+            pass
+        return "N/A"
+
+    def _fetch_resolution(self):
+        """Fetch screen resolution in background."""
+        res = "N/A"
+        try:
+            sys_name = platform.system()
+            if sys_name == "Windows":
+                r = subprocess.run(
+                    ["wmic", "desktopmonitor", "get",
+                     "ScreenWidth,ScreenHeight", "/value"],
+                    capture_output=True, text=True, timeout=5)
+                w = h = ""
+                for line in r.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith("ScreenWidth="):
+                        w = line.split("=",1)[1].strip()
+                    elif line.startswith("ScreenHeight="):
+                        h = line.split("=",1)[1].strip()
+                if w and h and w != "0":
+                    res = f"{w}x{h}"
+                else:
+                    # Fallback via PowerShell
+                    ps = ("[System.Windows.Forms.Screen]::PrimaryScreen.Bounds |"
+                          " ForEach-Object { $_.Width.ToString()+'x'+$_.Height.ToString() }")
+                    r2 = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command", ps],
+                        capture_output=True, text=True, timeout=5)
+                    v = r2.stdout.strip()
+                    if "x" in v:
+                        res = v
+            elif sys_name == "Darwin":
+                r = subprocess.run(
+                    ["system_profiler", "SPDisplaysDataType"],
+                    capture_output=True, text=True, timeout=5)
+                for line in r.stdout.splitlines():
+                    if "Resolution" in line:
+                        res = line.split(":",1)[1].strip().split(" @")[0]
+                        break
+            else:
+                # Linux: try xrandr, then xdpyinfo
+                try:
+                    r = subprocess.run(["xrandr","--current"],
+                                       capture_output=True, text=True, timeout=3)
+                    for line in r.stdout.splitlines():
+                        parts = line.split()
+                        if " connected" in line and len(parts) >= 3:
+                            # e.g. "HDMI-1 connected 1920x1080+0+0"
+                            import re as _re
+                            m = _re.search(r'\d{3,}x\d{3,}', line)
+                            if m:
+                                res = m.group(); break
+                except Exception:
+                    pass
+                if res == "N/A":
+                    try:
+                        r = subprocess.run(["xdpyinfo"],
+                                           capture_output=True, text=True, timeout=3)
+                        for line in r.stdout.splitlines():
+                            if "dimensions:" in line:
+                                res = line.split()[1]; break
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        with self._lock:
+            self.resolution = res
+
+    def _fetch_pkg_count(self):
+        """Fetch package count in background so it doesn't slow startup."""
+        count = "N/A"
+        try:
+            sys_name = platform.system()
+            if sys_name == "Darwin":
+                r = subprocess.run(["brew","list","--formula"],
+                                   capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    count = f"{len(r.stdout.strip().splitlines())} (brew)"
+            elif sys_name == "Windows":
+                r = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "Get-Package | Measure-Object | Select-Object -ExpandProperty Count"],
+                    capture_output=True, text=True, timeout=8)
+                v = r.stdout.strip()
+                if v.isdigit():
+                    count = f"{v} (winget)"
+                else:
+                    # Fallback: count winget list lines
+                    r2 = subprocess.run(["winget","list"],
+                                        capture_output=True, text=True, timeout=8)
+                    lines = [l for l in r2.stdout.splitlines()
+                             if l.strip() and not l.startswith("-") and not l.startswith("Name")]
+                    if lines:
+                        count = f"{len(lines)} (winget)"
+            elif sys_name == "Linux":
+                for cmd, flag in [
+                    ("dpkg-query", ["-l"]),
+                    ("rpm",        ["-qa"]),
+                    ("pacman",     ["-Q"]),
+                    ("apk",        ["list", "--installed"]),
+                ]:
+                    if shutil.which(cmd):
+                        r = subprocess.run([cmd] + flag,
+                                           capture_output=True, text=True, timeout=5)
+                        if r.returncode == 0:
+                            lines = [l for l in r.stdout.strip().splitlines()
+                                     if l and not l.startswith("Desired")]
+                            count = f"{len(lines)} ({cmd})"
+                            break
+        except Exception:
+            pass
+        with self._lock:
+            self.pkg_count = count
 
     @staticmethod
     def _scan_devices():
@@ -1461,10 +1782,8 @@ class SysData:
                 "portable device control","system control","consumer contr",
                 "vendor-defined","unknown device",
             }
-
             bt_names = {}
             seen_names = set()
-
             try:
                 ps_bt = (
                     "$skip=@('avrcp','pbap','hfp','hsp','gatt','sdp','rfcomm',"
@@ -1506,133 +1825,6 @@ class SysData:
                              "connected": True, "battery": None, "_iid": iid}
                     devs.append(entry)
                     bt_names[key] = entry
-            except Exception: pass
-
-            if bt_names:
-                try:
-                    ps_batA = (
-                        "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue |"
-                        " ForEach-Object {"
-                        "  $b=(Get-PnpDeviceProperty -InstanceId $_.InstanceId"
-                        "   -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2'"
-                        "   -ErrorAction SilentlyContinue).Data;"
-                        "  if($b -ne $null -and $b -ge 0 -and $b -le 100){"
-                        "    Write-Output ($_.FriendlyName+'|'+[int]$b)"
-                        "  }"
-                        "}"
-                    )
-                    r_a = subprocess.run(
-                        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_batA],
-                        capture_output=True, text=True, timeout=10)
-                    for line in r_a.stdout.strip().splitlines():
-                        line = line.strip()
-                        if "|" not in line: continue
-                        bname, bval = line.rsplit("|", 1)
-                        bval = bval.strip()
-                        if not bval.isdigit(): continue
-                        bkey = " ".join(bname.strip().lower().split()[:2])
-                        if bkey in bt_names and bt_names[bkey]["battery"] is None:
-                            bt_names[bkey]["battery"] = int(bval)
-                except Exception: pass
-
-                try:
-                    ps_batB = (
-                        "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue |"
-                        " ForEach-Object {"
-                        "  $reg='HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\'+$_.InstanceId;"
-                        "  $b=(Get-ItemProperty -Path $reg -Name BatteryLevel"
-                        "   -ErrorAction SilentlyContinue).BatteryLevel;"
-                        "  if($b -ne $null -and $b -ge 0 -and $b -le 100){"
-                        "    Write-Output ($_.FriendlyName+'|'+[int]$b)"
-                        "  }"
-                        "}"
-                    )
-                    r_b = subprocess.run(
-                        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_batB],
-                        capture_output=True, text=True, timeout=10)
-                    for line in r_b.stdout.strip().splitlines():
-                        line = line.strip()
-                        if "|" not in line: continue
-                        bname, bval = line.rsplit("|", 1)
-                        bval = bval.strip()
-                        if not bval.isdigit(): continue
-                        bkey = " ".join(bname.strip().lower().split()[:2])
-                        if bkey in bt_names and bt_names[bkey]["battery"] is None:
-                            bt_names[bkey]["battery"] = int(bval)
-                except Exception: pass
-
-                try:
-                    ps_batC = (
-                        "Get-WmiObject Win32_Battery -ErrorAction SilentlyContinue |"
-                        " Select-Object Name,EstimatedChargeRemaining |"
-                        " ForEach-Object {"
-                        "  if($_.EstimatedChargeRemaining -ne $null){"
-                        "    Write-Output ($_.Name+'|'+[int]$_.EstimatedChargeRemaining)"
-                        "  }"
-                        "}"
-                    )
-                    r_c = subprocess.run(
-                        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_batC],
-                        capture_output=True, text=True, timeout=8)
-                    for line in r_c.stdout.strip().splitlines():
-                        line = line.strip()
-                        if "|" not in line: continue
-                        bname, bval = line.rsplit("|", 1)
-                        bval = bval.strip()
-                        if not bval.isdigit(): continue
-                        bkey = " ".join(bname.strip().lower().split()[:2])
-                        if bkey in bt_names and bt_names[bkey]["battery"] is None:
-                            bt_names[bkey]["battery"] = int(bval)
-                except Exception: pass
-
-            for d in devs:
-                d.pop("_iid", None)
-
-            try:
-                ps_usb = (
-                    "Get-WmiObject Win32_PnPEntity -ErrorAction SilentlyContinue |"
-                    " Where-Object {"
-                    "  $_.PNPClass -in @('WPD','DiskDrive') -or"
-                    "  ($_.PNPClass -eq 'HIDClass' -and $_.Name -match 'Xbox|Controller|Gamepad') -or"
-                    "  ($_.PNPClass -eq 'USB' -and $_.Present -eq $true -and"
-                    "   $_.Name -notmatch 'Hub|Root|Host|Composite|Unknown|Microsoft|Intel|Realtek')"
-                    "} | ForEach-Object { Write-Output ($_.Name+'|'+$_.PNPClass) }"
-                )
-                r_usb = subprocess.run(
-                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_usb],
-                    capture_output=True, text=True, timeout=10)
-                for line in r_usb.stdout.strip().splitlines():
-                    line = line.strip()
-                    if not line or "|" not in line: continue
-                    name, cls = line.rsplit("|", 1)
-                    name = name.strip(); cls = cls.strip()
-                    if not name: continue
-                    nl = name.lower()
-                    if any(x in nl for x in _JUNK): continue
-                    if any(x in nl for x in _SKIP): continue
-                    key = " ".join(nl.split()[:2])
-                    if key in seen_names: continue
-                    seen_names.add(key)
-                    if any(x in nl for x in ("xbox","controller","gamepad","joystick")):
-                        dtype = "CTRL"
-                    elif any(x in nl for x in ("phone","android","iphone","mobile","adb")):
-                        dtype = "PHONE"
-                    elif any(x in nl for x in ("camera","webcam","imaging")):
-                        dtype = "CAM"
-                    elif any(x in nl for x in ("headset","headphone","earphone","buds","airpod")):
-                        dtype = "AUDIO"
-                    elif any(x in nl for x in ("storage","disk","drive","flash","ssd","hdd")):
-                        dtype = "STOR"
-                    elif any(x in nl for x in ("mouse","trackpad","touchpad")):
-                        dtype = "MOUSE"
-                    elif any(x in nl for x in ("keyboard","kbd")):
-                        dtype = "KBD"
-                    elif cls == "WPD":
-                        dtype = "MTP"
-                    else:
-                        dtype = "USB"
-                    devs.append({"name": name[:30], "type": dtype,
-                                 "connected": True, "battery": None})
             except Exception: pass
 
         elif sys_name == "Darwin":
@@ -1683,8 +1875,7 @@ class SysData:
                 r = subprocess.run(["lsusb"], capture_output=True, text=True, timeout=3)
                 for line in r.stdout.splitlines():
                     if ":" in line:
-                        name = line.split(":",1)[1].strip().split("ID")[0]
-                        name = name.strip()
+                        name = line.split(":",1)[1].strip().split("ID")[0].strip()
                         if name and "Hub" not in name and "root" not in name.lower():
                             devs.append({"name":name[:28],"type":"USB",
                                          "connected":True,"battery":None})
@@ -1698,26 +1889,28 @@ class SysData:
             try:
                 b = psutil.sensors_battery()
                 if b: self.bat_pct,self.bat_plug = int(b.percent),b.power_plugged
-            except: pass
+            except Exception: pass
             try: self.cpu = psutil.cpu_percent(interval=None)
-            except: pass
+            except Exception: pass
             try:
                 m = psutil.virtual_memory()
-                self.mem_pct,self.mem_used,self.mem_total = m.percent,m.used/1e9,m.total/1e9
-            except: pass
+                self.mem_pct  = m.percent
+                self.mem_used  = m.used / 1e9
+                self.mem_total = m.total / 1e9
+            except Exception: pass
             try:
-                p = "/" if platform.system()!="Windows" else "C:\\"
+                p = "/" if platform.system() != "Windows" else "C:\\"
                 self.disk_pct = psutil.disk_usage(p).percent
-            except: pass
+            except Exception: pass
             try:
                 n = psutil.net_io_counters()
                 if self._pnet:
-                    self.net_dn=(n.bytes_recv-self._pnet.bytes_recv)/1024/2
-                    self.net_up=(n.bytes_sent-self._pnet.bytes_sent)/1024/2
+                    self.net_dn = (n.bytes_recv - self._pnet.bytes_recv) / 1024 / 2
+                    self.net_up = (n.bytes_sent - self._pnet.bytes_sent) / 1024 / 2
                 self._pnet = n
-            except: pass
-            try: self.uptime = int(time.time()-self._boot)
-            except: pass
+            except Exception: pass
+            try: self.uptime = int(time.time() - self._boot)
+            except Exception: pass
         if time.time() - self._dev_last > 8 and not self._dev_scanning:
             self._dev_last     = time.time()
             self._dev_scanning = True
@@ -1732,7 +1925,7 @@ class SysData:
 
     def snap(self):
         with self._lock:
-            return {k:v for k,v in self.__dict__.items() if not k.startswith("_")}
+            return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
 
 SD = SysData()
 def _poll_loop():
@@ -1844,6 +2037,7 @@ class State:
         self.cal_add   = False
         self.cal_buf   = ""
         self._spec_smooth = [0.0]*32
+        self._anim_t   = 0.0   # animation time counter
 
 ST = State()
 
@@ -1853,6 +2047,9 @@ ST = State()
 def tick():
     now = time.time()
     AUDIO.tick()
+
+    # Advance animation time
+    ST._anim_t += 0.05
 
     if ST.pomo_run:
         dt = now - ST._pw
@@ -2087,123 +2284,120 @@ def v_focus(win, W, H):
 # ══════════════════════════════════════════════════════════════════════════════
 #  VIEW 4 — NEOFETCH
 # ══════════════════════════════════════════════════════════════════════════════
-_LOGO_MAC = [
-    "        ###        ",
-    "       #####       ",
-    "      #######      ",
-    "    ###########    ",
-    "   #############   ",
-    "  ###############  ",
-    "  ###############  ",
-    "   #############   ",
-    "    ###########    ",
-    "      #######      ",
-]
-_LOGO_LIN = [
-    "        /\\         ",
-    "       /  \\        ",
-    "      /\\   \\       ",
-    "     /  \\   \\      ",
-    "    / /\\ \\   \\     ",
-    "   / /  \\ \\   \\    ",
-    "  / /    \\ \\   \\   ",
-    " /_/______\\_\\   \\  ",
-    "              \\  \\ ",
-    "               \\__\\",
-]
-_LOGO_WIN = [
-    "  ████████ ████████",
-    "  ████████ ████████",
-    "  ████████ ████████",
-    "  ████████ ████████",
-    "           ████████",
-    "  ████████ ████████",
-    "  ████████ ████████",
-    "  ████████ ████████",
-    "  ████████ ████████",
-    "                   ",
-]
 
 def v_neofetch(win, W, H):
-    sd  = SD.snap()
-    sys_name = platform.system()
-    art  = _LOGO_MAC if sys_name=="Darwin" else (_LOGO_WIN if sys_name=="Windows" else _LOGO_LIN)
-    acol = P_CYAN if sys_name=="Darwin" else (P_BLUE if sys_name=="Windows" else P_AMBER)
+    sd       = SD.snap()
 
-    ax, ay = 3, 2
-    for i, line in enumerate(art):
-        put(win, ay+i, ax, line, cp(acol, bold=True))
+    # ── Layout ────────────────────────────────────────────────────────────
+    AX     = 2          # logo left edge
+    AY     = 1          # logo top
+    LOGO_W = 26         # pac-man column width
+    IX     = AX + LOGO_W + 1   # info column starts here
+    KEY_W  = 11         # width of key label field
+    VAL_X  = IX + KEY_W
 
-    uh,rem=divmod(sd["uptime"],3600); um=rem//60
-    shell=os.environ.get("SHELL","cmd").split("/")[-1].split("\\")[-1]
-    term_h, term_w = win.getmaxyx()
+    # ── Animated logo ─────────────────────────────────────────────────────
+    logo_h = draw_animated_logo(win, AY, AX, ST._anim_t)
 
-    pkg_count = "N/A"
-    try:
-        if sys_name=="Darwin":
-            r=subprocess.run(["brew","list","--formula"],capture_output=True,text=True,timeout=2)
-            pkg_count=str(len(r.stdout.strip().splitlines()))+" (brew)"
-        elif sys_name=="Linux":
-            for cmd,flag in [("dpkg-query","-l"),("rpm","-qa"),("pacman","-Q")]:
-                if shutil.which(cmd):
-                    r=subprocess.run([cmd,flag],capture_output=True,text=True,timeout=2)
-                    pkg_count=str(len(r.stdout.strip().splitlines()))
-                    break
-    except: pass
+    # ── Collect all values ────────────────────────────────────────────────
+    uh, rem   = divmod(sd.get("uptime", 0), 3600)
+    um        = rem // 60
+    mem_used  = sd.get("mem_used",  0.0)
+    mem_total = sd.get("mem_total", 8.0)
+    cpu_val   = sd.get("cpu",       0.0)
+    disk_pct  = sd.get("disk_pct",  0.0)
+    bat_pct   = sd.get("bat_pct",   100)
+    bat_plug  = sd.get("bat_plug",  True)
+    net_dn    = sd.get("net_dn",    0.0)
+    net_up    = sd.get("net_up",    0.0)
+    user      = os.environ.get("USER", os.environ.get("USERNAME", "user"))
+    term_emu  = os.environ.get("TERM_PROGRAM",
+                    os.environ.get("TERM",
+                    os.environ.get("WT_SESSION" and "Windows Terminal" or "", "unknown")))
+    if platform.system() == "Windows" and term_emu in ("unknown", ""):
+        if os.environ.get("WT_SESSION"):
+            term_emu = "Windows Terminal"
+        elif os.environ.get("TERM_PROGRAM"):
+            term_emu = os.environ["TERM_PROGRAM"]
+        else:
+            term_emu = "conhost"
 
-    term_emu = os.environ.get("TERM_PROGRAM", os.environ.get("TERM","unknown"))
+    uptime_s = f"{uh}h {um:02d}m" if uh else f"{um}m"
+    mem_s    = f"{mem_used:.0f} MiB / {mem_total*1024:.0f} MiB"
 
+    # Build info rows — (key, value) pairs
     info = [
-        ("OS",       sd["os_str"]),
-        ("HOST",     sd["hostname"]),
-        ("KERNEL",   sd["kernel"]),
-        ("UPTIME",   f"{uh}h {um:02d}m"),
-        ("SHELL",    shell),
-        ("TERMINAL", term_emu[:20]),
-        ("PACKAGES", pkg_count),
-        ("CPU",      sd["cpu_name"]),
-        ("GPU",      sd["gpu_name"]),
-        ("MEMORY",   f"{sd['mem_used']:.1f} / {sd['mem_total']:.1f} GB  ({sd['mem_pct']:.0f}%)"),
-        ("DISK",     f"{sd['disk_pct']:.0f}% used"),
-        ("BATTERY",  f"{sd['bat_pct']}% {'+charging' if sd['bat_plug'] else 'on battery'}"),
-        ("LOCAL IP", sd["local_ip"]),
-        ("WIFI",     sd["ssid"]),
-        ("CORES",    str(sd["cpu_cores"])),
-        ("RES",      f"{term_w}x{term_h}"),
+        ("OS",         sd.get("os_str",     platform.system())),
+        ("Host",       sd.get("hostname",   socket.gethostname())),
+        ("Kernel",     sd.get("kernel",     platform.release())),
+        ("Uptime",     uptime_s),
+        ("Packages",   sd.get("pkg_count",  "…")),
+        ("Shell",      sd.get("shell",      os.environ.get("SHELL","?").split("/")[-1])),
+        ("Resolution", sd.get("resolution", "N/A")),
+        ("DE / WM",    sd.get("de_wm",      "N/A")),
+        ("Terminal",   term_emu),
+        ("CPU",        sd.get("cpu_name",   "N/A")),
+        ("GPU",        sd.get("gpu_name",   "N/A")),
+        ("Memory",     mem_s),
+        ("Disk",       f"{disk_pct:.0f}% used"),
+        ("Battery",    f"{bat_pct}%  {'charging' if bat_plug else 'on battery'}"),
+        ("Local IP",   sd.get("local_ip",   "N/A")),
+        ("WiFi",       sd.get("ssid",       "N/A")),
+        ("Cores",      str(sd.get("cpu_cores", os.cpu_count() or 1))),
     ]
 
-    ix = ax + 22
-    user_host = f"{os.environ.get('USER', os.environ.get('USERNAME','user'))}@{sd['hostname']}"
-    put(win, ay,   ix, user_host[:W-ix-2], cp(P_HI, bold=True))
-    sep = "─" * min(len(user_host), W-ix-2)
-    put(win, ay+1, ix, sep, cp(P_BOX))
-    for i,(k,v) in enumerate(info):
-        put(win, ay+2+i, ix,    f"{k:<10}", cp(P_CYAN))
-        put(win, ay+2+i, ix+10, v[:W-ix-13], cp(P_HI))
+    # ── user@host header ──────────────────────────────────────────────────
+    host      = sd.get("hostname", socket.gethostname())
+    user_host = f"{user}@{host}"
+    max_info_w = max(1, W - VAL_X - 2)
 
-    pal_y = ay + max(len(art), len(info)+3) + 1
-    put(win, pal_y, ax, "colours  ", cp(P_DIM))
-    palettes = [P_DIM,P_MID,P_HI,P_RED,P_AMBER,P_GREEN,P_CYAN,P_BLUE,P_PINK]
-    for i,c in enumerate(palettes):
-        put(win, pal_y, ax+9+i*3, "██", cp(c))
-    for i,c in enumerate(palettes):
-        put(win, pal_y+1, ax+9+i*3, "██", cp(c,bold=True))
+    put(win, AY,   IX, user_host[:W-IX-2], cp(P_HI, bold=True))
+    put(win, AY+1, IX, "─" * min(len(user_host), W-IX-2), cp(P_BOX))
 
-    br_y = pal_y + 3
-    bw2  = W - 14
-    if br_y + 8 < H:
-        box(win, br_y, 2, 9, W-4, "LIVE RESOURCES")
-        res=[("CPU  ",int(sd["cpu"]),P_CYAN),("MEM  ",int(sd["mem_pct"]),P_BLUE),
-             ("DISK ",int(sd["disk_pct"]),P_AMBER),("BAT  ",sd["bat_pct"],P_GREEN if sd["bat_pct"]>40 else P_RED),
-             ("NET↓ ",min(100,int(sd["net_dn"]/500*100)),P_GREEN),
-             ("NET↑ ",min(100,int(sd["net_up"]/200*100)),P_PINK)]
-        for i,(lbl,pct,col) in enumerate(res):
-            ry=br_y+1+i
-            put(win,ry,4,lbl,cp(P_DIM))
-            hbar(win,ry,10,bw2,pct,col)
-            put(win,ry,10+bw2+1,f"{pct:3d}%",cp(col))
+    # ── info rows ─────────────────────────────────────────────────────────
+    for i, (k, v) in enumerate(info):
+        ry = AY + 2 + i
+        if ry >= H - 6:
+            break
+        put(win, ry, IX,    f"{k:<{KEY_W}}", cp(P_CYAN, bold=True))
+        put(win, ry, VAL_X, str(v)[:max_info_w], cp(P_HI))
 
-    put(win,H-1,0," live neofetch · auto-refreshes  [←→] views  [q] quit ",cp(P_DIM))
+    # ── colour swatches (like neofetch) ───────────────────────────────────
+    info_rows_drawn = min(len(info), H - 6 - AY - 2)
+    pal_y = AY + 2 + info_rows_drawn + 1
+    if pal_y + 2 < H - 4:
+        palettes = [P_RED, P_GREEN, P_AMBER, P_CYAN, P_BLUE, P_PINK, P_HI, P_DIM]
+        put(win, pal_y, IX, "".join("██" for _ in palettes),
+            cp(P_HI))
+        for i, c in enumerate(palettes):
+            put(win, pal_y,   IX + i*2, "██", cp(c))
+        for i, c in enumerate(palettes):
+            put(win, pal_y+1, IX + i*2, "██", cp(c, bold=True))
+
+    # ── live resource bars (full width, below everything) ─────────────────
+    bar_top = max(AY + logo_h + 1, pal_y + 3)
+    bar_h   = 8
+    bw      = W - 8
+    if bar_top + bar_h < H - 2:
+        box(win, bar_top, 2, bar_h, W-4, "LIVE RESOURCES")
+        res_rows = [
+            ("CPU  ", int(cpu_val),                              P_CYAN),
+            ("MEM  ", int(mem_used / max(mem_total, 0.1) * 100), P_BLUE),
+            ("DISK ", int(disk_pct),                             P_AMBER),
+            ("BAT  ", bat_pct,  P_GREEN if bat_pct > 40 else P_RED),
+            ("NET↓ ", min(100, int(net_dn / 500 * 100)),         P_GREEN),
+            ("NET↑ ", min(100, int(net_up / 200 * 100)),         P_PINK),
+        ]
+        for i, (lbl, pct, col) in enumerate(res_rows):
+            ry = bar_top + 1 + i
+            if ry >= H - 2: break
+            put(win, ry, 4, lbl, cp(P_DIM))
+            hbar(win, ry, 9, bw, pct, col)
+            put(win, ry, 9+bw+1, f"{pct:3d}%", cp(col))
+
+    put(win, H-1, 0,
+        " neofetch · live stats · auto-refresh  [←→] views  [q] quit ",
+        cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  VIEW 5 — NETWORK + DEVICES
@@ -2213,16 +2407,17 @@ def v_network(win, W, H):
     hw  = W//2-1
 
     box(win,1,0,14,hw,"NETWORK")
-    rows=[("SSID",sd["ssid"]),("LOCAL IP",sd["local_ip"]),
-          ("HOST",sd["hostname"]),("↓ RECV",kbfmt(sd["net_dn"])),
-          ("↑ SEND",kbfmt(sd["net_up"])),("CPU",f"{sd['cpu']:.1f}%"),
-          ("MEM",f"{sd['mem_pct']:.1f}%"),("DISK",f"{sd['disk_pct']:.0f}%")]
+    rows=[("SSID",sd.get("ssid","N/A")),("LOCAL IP",sd.get("local_ip","N/A")),
+          ("HOST",sd.get("hostname","N/A")),("↓ RECV",kbfmt(sd.get("net_dn",0))),
+          ("↑ SEND",kbfmt(sd.get("net_up",0))),("CPU",f"{sd.get('cpu',0):.1f}%"),
+          ("MEM",f"{sd.get('mem_pct',0):.1f}%"),("DISK",f"{sd.get('disk_pct',0):.0f}%")]
     for i,(k,v) in enumerate(rows):
         put(win,2+i,2,f"{k:<9}",cp(P_DIM)); put(win,2+i,11,v[:hw-14],cp(P_HI))
 
-    put(win,10,2,"DOWN",cp(P_DIM)); hbar(win,10,7,hw-10,min(100,int(sd["net_dn"]/1000*100)),P_GREEN)
-    put(win,11,2,"UP  ",cp(P_DIM)); hbar(win,11,7,hw-10,min(100,int(sd["net_up"]/500*100)), P_BLUE)
-    put(win,12,2,"CPU ",cp(P_DIM)); hbar(win,12,7,hw-10,int(sd["cpu"]),P_CYAN)
+    net_dn = sd.get("net_dn", 0); net_up = sd.get("net_up", 0)
+    put(win,10,2,"DOWN",cp(P_DIM)); hbar(win,10,7,hw-10,min(100,int(net_dn/1000*100)),P_GREEN)
+    put(win,11,2,"UP  ",cp(P_DIM)); hbar(win,11,7,hw-10,min(100,int(net_up/500*100)), P_BLUE)
+    put(win,12,2,"CPU ",cp(P_DIM)); hbar(win,12,7,hw-10,int(sd.get("cpu",0)),P_CYAN)
 
     rx=hw+1; rw=W-rx-1
     devices = SD.devices
@@ -2257,7 +2452,7 @@ def v_network(win, W, H):
             if right_s:
                 put(win, ry, rx+rw-len(right_s)-2, right_s, right_c)
 
-    bat=sd["bat_pct"]; plug=sd["bat_plug"]
+    bat=sd.get("bat_pct",100); plug=sd.get("bat_plug",True)
     bc=P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
     n_devs   = min(len(SD.devices), 14)
     bat_y    = max(16, 3 + n_devs + 2)
@@ -2275,7 +2470,7 @@ def v_network(win, W, H):
             put(win,bat_y+4,bx,s,cp(dbc))
             bx += len(s)
     else:
-        put(win,bat_y+4,2,f"cpu {sd['cpu']:.0f}%  mem {sd['mem_pct']:.0f}%  disk {sd['disk_pct']:.0f}%",cp(P_DIM))
+        put(win,bat_y+4,2,f"cpu {sd.get('cpu',0):.0f}%  mem {sd.get('mem_pct',0):.0f}%  disk {sd.get('disk_pct',0):.0f}%",cp(P_DIM))
 
     vy=24; vis_h=max(2,H-vy-3)
     if vy+vis_h+1<H:
@@ -2395,7 +2590,7 @@ def v_library(win, W, H):
 def draw_topbar(win, W):
     now=datetime.datetime.now(); sd=SD.snap()
     ts=now.strftime("%H:%M:%S"); ds=now.strftime("%a %b %d").upper()
-    bat=sd["bat_pct"]; plug=sd["bat_plug"]
+    bat=sd.get("bat_pct",100); plug=sd.get("bat_plug",True)
     bc=P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
     put(win,0,0," "*W, cp(P_DIM)|curses.A_REVERSE)
     put(win,0,1,f" {ts}  {ds}", cp(P_HI)|curses.A_REVERSE)
@@ -2405,7 +2600,7 @@ def draw_topbar(win, W):
         td=AUDIO.current
         note_s=f" ~ {td['name'][:20]} "
         put(win,0,W//2+len(vn)//2+2,note_s, cp(P_CYAN)|curses.A_REVERSE)
-    right=f" {'+'if plug else ' '}{bat}%  {sd['cpu']:.0f}%cpu  {sd['mem_pct']:.0f}%mem "
+    right=f" {'+'if plug else ' '}{bat}%  {sd.get('cpu',0):.0f}%cpu  {sd.get('mem_pct',0):.0f}%mem "
     put(win,0,W-len(right)-1,right, cp(bc)|curses.A_REVERSE)
 
 def draw_navbar(win, W, H):
@@ -2894,14 +3089,11 @@ def v_video(win, W, H):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  INPUT HANDLER  (all key routing lives here)
+#  INPUT HANDLER
 # ══════════════════════════════════════════════════════════════════════════════
 def handle_key(k):
     v = ST.view
 
-    # ── 1. TEXT INPUT MODES — consume ALL keys, no fall-through ──────────
-
-    # Todo add
     if ST.todo_add:
         if k in (10, 13):
             t = ST.todo_buf.strip()
@@ -2918,12 +3110,10 @@ def handle_key(k):
             ST.todo_buf = _text_input(ST.todo_buf, k)
         return
 
-    # Calendar overlays
     if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode):
         _handle_cal_input(k)
         return
 
-    # Library text input
     if v == 5 and LS.mode in ("add_url", "add_file"):
         if k in (10, 13):
             t = LS.buf.strip()
@@ -2940,7 +3130,6 @@ def handle_key(k):
             LS.buf = _text_input(LS.buf, k)
         return
 
-    # Video text input
     if v == 7 and VS.mode in ("add_url", "add_file"):
         if k in (10, 13):
             src = VS.buf.strip()
@@ -2963,21 +3152,18 @@ def handle_key(k):
             VS.buf += chr(k)
         return
 
-    # ── 2. GLOBAL NAV ─────────────────────────────────────────────────────
     if k in (curses.KEY_RIGHT, ord('l'), 9):
         ST.view = (v + 1) % len(VIEWS); return
     if k in (curses.KEY_LEFT, ord('h')):
         ST.view = (v - 1) % len(VIEWS); return
 
-    # ── 3. GLOBAL MUSIC CONTROLS ──────────────────────────────────────────
     if k == ord(' ') and v != 0: AUDIO.toggle_play(); return
     if k == ord('z'):             AUDIO.prev_track();  return
     if k == ord('x'):             AUDIO.next_track();  return
     if k == ord('s') and v != 2: AUDIO.shuffle = not AUDIO.shuffle; return
     if k == ord('R'):             AUDIO.repeat = not AUDIO.repeat;   return
 
-    # ── 4. VIEW-SPECIFIC ──────────────────────────────────────────────────
-    if v == 0:   # Dashboard
+    if v == 0:
         if k in (curses.KEY_UP,   ord('k')): ST.todo_cur = max(0, ST.todo_cur - 1)
         elif k in (curses.KEY_DOWN, ord('j')): ST.todo_cur = min(len(ST.todos)-1, ST.todo_cur+1)
         elif k in (10, 13) and ST.todos:
@@ -2992,7 +3178,7 @@ def handle_key(k):
         elif k == ord('p'): ST.pomo_run = not ST.pomo_run; ST._pw = time.time()
         elif k == ord('r'): ST.pomo_run = False; ST.pomo_secs = ST.pomo_total; ST._pw = time.time()
 
-    elif v == 2:  # Focus
+    elif v == 2:
         if k == ord('p'):   ST.pomo_run = not ST.pomo_run; ST._pw = time.time()
         elif k == ord('r'): ST.pomo_run = False; ST.pomo_secs = ST.pomo_total; ST._pw = time.time()
         elif k == ord('s'):
@@ -3002,7 +3188,7 @@ def handle_key(k):
             ST.pomo_secs  = ST.pomo_total; ST._pw = time.time()
         elif k == ord('f'): ST.focus_idx = (ST.focus_idx+1) % len(ST.focus_modes)
 
-    elif v == 5:  # Library
+    elif v == 5:
         if LS.mode == "browse":
             if k in (curses.KEY_UP,   ord('k')): LS.cursor = max(0, LS.cursor-1)
             elif k in (curses.KEY_DOWN, ord('j')): LS.cursor = min(len(AUDIO.library)-1, LS.cursor+1)
@@ -3023,7 +3209,7 @@ def handle_key(k):
             elif k in (ord('n'), ord('N'), 27):
                 LS.mode = "browse"
 
-    elif v == 6:  # Calendar
+    elif v == 6:
         if k == ord('1'):   CS.mode = "day"
         elif k == ord('2'): CS.mode = "week"
         elif k == ord('3'): CS.mode = "month"
@@ -3067,7 +3253,7 @@ def handle_key(k):
             threading.Thread(target=refresh_calendar, daemon=True).start()
             CS.msg = "Refreshing..."; CS.msg_time = time.time()
 
-    elif v == 7:  # Video
+    elif v == 7:
         if k == ord('Y'):   VS.mode = "add_url";  VS.buf = ""
         elif k == ord('O'): VS.mode = "add_file"; VS.buf = ""
         elif k == ord('S'):
@@ -3082,7 +3268,6 @@ VIEW_FNS = [v_dashboard, v_clock, v_focus, v_neofetch, v_network,
             v_library, v_calendar, v_video]
 
 def _in_text_input_mode():
-    """Return True whenever a text-entry overlay is consuming all keys."""
     v = ST.view
     if ST.todo_add:                                              return True
     if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode):  return True
@@ -3092,7 +3277,6 @@ def _in_text_input_mode():
 
 
 def main(stdscr):
-    # Zero ESC delay so pasted text containing 0x1b bytes doesn't stall.
     os.environ["ESCDELAY"] = "0"
 
     curses.curs_set(0)
@@ -3121,11 +3305,6 @@ def main(stdscr):
         draw_navbar(stdscr, W, H)
         stdscr.refresh()
 
-        # Drain ALL pending keypresses each frame.
-        # Terminals deliver pasted text as a rapid burst — reading only one
-        # key per 50 ms frame means a 32-char Client ID takes 1.6 s to land.
-        # We read up to 256 chars per frame when a text overlay is open so
-        # the whole paste is consumed in one go.
         in_text = _in_text_input_mode()
         max_keys = 256 if in_text else 8
         for _ in range(max_keys):
@@ -3137,7 +3316,6 @@ def main(stdscr):
                 save_todos(ST.todos)
                 return
             handle_key(k)
-            # Re-check text mode after each key (an Enter may close the overlay)
             in_text = _in_text_input_mode()
 
 
