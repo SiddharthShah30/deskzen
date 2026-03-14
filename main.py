@@ -1438,7 +1438,7 @@ class SysData:
         self.disk_pct  = 0.0;  self.net_dn    = 0.0;  self.net_up = 0.0
         self.hostname  = socket.gethostname()
         self.os_str    = self._os()
-        self.kernel    = platform.release()[:26]
+        self.kernel    = self._kernel()
         self.cpu_name  = self._cpu()
         self.gpu_name  = self._gpu()
         self.uptime    = 0
@@ -1464,7 +1464,24 @@ class SysData:
         if s == "Darwin":
             v = platform.mac_ver()[0]; return f"macOS {v}"
         if s == "Windows":
-            # Detect Windows 10 vs 11 properly from build number
+            # Detect Windows 10 vs 11 + edition (Home/Pro/etc.) from registry
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+                build    = int(winreg.QueryValueEx(key, "CurrentBuildNumber")[0])
+                edition  = winreg.QueryValueEx(key, "EditionID")[0]          # "Core" = Home
+                ubr      = winreg.QueryValueEx(key, "UBR")[0]                # update build rev
+                winreg.CloseKey(key)
+                ver   = "11" if build >= 22000 else "10"
+                # EditionID: "Core"=Home, "Professional"=Pro, "Enterprise", etc.
+                ed    = {"Core": "Home", "CoreN": "Home N",
+                         "Professional": "Pro", "ProfessionalN": "Pro N",
+                         "Enterprise": "Enterprise",
+                         "Education": "Education"}.get(edition, edition)
+                return f"Windows {ver} {ed} (Build {build}.{ubr})"
+            except Exception:
+                pass
             try:
                 build = int(platform.version().split(".")[-1])
                 major = int(platform.version().split(".")[0])
@@ -1489,6 +1506,26 @@ class SysData:
         return f"Linux {platform.release()[:20]}"
 
     @staticmethod
+    def _kernel():
+        s = platform.system()
+        if s == "Windows":
+            # Show full NT version: e.g. "NT 10.0.22621"
+            try:
+                import winreg
+                key   = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+                build = winreg.QueryValueEx(key, "CurrentBuildNumber")[0]
+                ubr   = winreg.QueryValueEx(key, "UBR")[0]
+                winreg.CloseKey(key)
+                return f"NT 10.0.{build}.{ubr}"
+            except Exception:
+                pass
+            return f"NT {platform.version()}"[:26]
+        if s == "Darwin":
+            return f"Darwin {platform.release()}"[:26]
+        return platform.release()[:26]
+
+    @staticmethod
     def _cpu():
         try:
             if platform.system() == "Darwin":
@@ -1502,11 +1539,25 @@ class SysData:
                         if "model name" in line:
                             return line.split(":",1)[1].strip()[:36]
             if platform.system() == "Windows":
-                r = subprocess.run(["wmic","cpu","get","name","/value"],
-                                   capture_output=True, text=True, timeout=3)
-                for line in r.stdout.splitlines():
-                    if "Name=" in line:
-                        return line.split("=",1)[1].strip()[:36]
+                # Try PowerShell first (works on Win11 where wmic is deprecated)
+                try:
+                    r = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "(Get-CimInstance Win32_Processor).Name"],
+                        capture_output=True, text=True, timeout=4)
+                    v = r.stdout.strip()
+                    if v: return v[:40]
+                except Exception:
+                    pass
+                # Fallback: wmic (works on Win10)
+                try:
+                    r = subprocess.run(["wmic","cpu","get","name","/value"],
+                                       capture_output=True, text=True, timeout=3)
+                    for line in r.stdout.splitlines():
+                        if "Name=" in line:
+                            return line.split("=",1)[1].strip()[:40]
+                except Exception:
+                    pass
         except Exception:
             pass
         return platform.processor()[:36] or "Unknown CPU"
@@ -1519,19 +1570,137 @@ class SysData:
                                    capture_output=True, text=True, timeout=4)
                 for line in r.stdout.splitlines():
                     if "Chipset Model" in line or "Chip" in line:
-                        return line.split(":",1)[1].strip()[:32]
+                        return line.split(":",1)[1].strip()[:40]
+
             if platform.system() == "Linux":
-                r = subprocess.run(["lspci"], capture_output=True, text=True, timeout=3)
-                for line in r.stdout.splitlines():
-                    if "VGA" in line or "3D" in line:
-                        return line.split(":",2)[-1].strip()[:32]
+                gpus = []
+
+                # 1) nvidia-smi — most reliable for NVIDIA cards
+                try:
+                    r = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=name",
+                         "--format=csv,noheader"],
+                        capture_output=True, text=True, timeout=4)
+                    if r.returncode == 0:
+                        for name in r.stdout.strip().splitlines():
+                            name = name.strip()
+                            if name and name not in gpus:
+                                gpus.append(name[:36])
+                except Exception:
+                    pass
+
+                # 2) lspci — catches Intel iGPU and any card nvidia-smi missed
+                try:
+                    r = subprocess.run(["lspci", "-mm"],
+                                       capture_output=True, text=True, timeout=3)
+                    for line in r.stdout.splitlines():
+                        upper = line.upper()
+                        if "VGA" in upper or "3D" in upper or "DISPLAY" in upper:
+                            # lspci -mm format: addr "class" "vendor" "device" …
+                            # Pull quoted fields for vendor + device
+                            import re as _re
+                            fields = _re.findall(r'"([^"]*)"', line)
+                            if len(fields) >= 3:
+                                vendor = fields[1].strip()
+                                device = fields[2].strip()
+                                # Skip generic/sub-device entries
+                                if device and device not in ("", "Device"):
+                                    name = f"{vendor} {device}".strip()[:36]
+                                    # Avoid duplicating an already-found NVIDIA entry
+                                    already = any(
+                                        "nvidia" in g.lower() and "nvidia" in name.lower()
+                                        for g in gpus)
+                                    if not already and name not in gpus:
+                                        gpus.append(name)
+                            else:
+                                # Fallback: last colon-separated field
+                                raw = line.split(":",2)[-1].strip()[:36]
+                                if raw and raw not in gpus:
+                                    gpus.append(raw)
+                except Exception:
+                    pass
+
+                # 3) /sys DRM nodes — last resort (no lspci available)
+                if not gpus:
+                    try:
+                        drm = "/sys/class/drm"
+                        seen = set()
+                        for entry in sorted(os.listdir(drm)):
+                            vendor_f = os.path.join(drm, entry, "device", "vendor")
+                            device_f = os.path.join(drm, entry, "device", "device")
+                            if os.path.exists(vendor_f) and os.path.exists(device_f):
+                                vid = open(vendor_f).read().strip()
+                                did = open(device_f).read().strip()
+                                key = (vid, did)
+                                if key not in seen:
+                                    seen.add(key)
+                                    label = f"GPU {vid}:{did}"
+                                    gpus.append(label)
+                    except Exception:
+                        pass
+
+                if gpus:
+                    return " / ".join(gpus)
+
             if platform.system() == "Windows":
-                r = subprocess.run(["wmic","path","win32_VideoController",
-                                    "get","name","/value"],
-                                   capture_output=True, text=True, timeout=3)
-                for line in r.stdout.splitlines():
-                    if "Name=" in line:
-                        return line.split("=",1)[1].strip()[:32]
+                gpus = []
+
+                # 1) nvidia-smi — most accurate name for NVIDIA cards
+                try:
+                    r = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=name",
+                         "--format=csv,noheader"],
+                        capture_output=True, text=True, timeout=4)
+                    if r.returncode == 0:
+                        for name in r.stdout.strip().splitlines():
+                            name = name.strip()
+                            if name and name not in gpus:
+                                gpus.append(name[:38])
+                except Exception:
+                    pass
+
+                # 2) PowerShell CIM (Win10/11, works where wmic is deprecated)
+                try:
+                    r = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "(Get-CimInstance Win32_VideoController).Name -join '|'"],
+                        capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0:
+                        for name in r.stdout.strip().split("|"):
+                            name = name.strip()
+                            if not name:
+                                continue
+                            # Skip Microsoft Basic Display / Remote Desktop adapters
+                            nl = name.lower()
+                            if any(x in nl for x in ("microsoft basic", "remote desktop",
+                                                      "hyper-v", "virtual")):
+                                continue
+                            # Don't duplicate an NVIDIA entry already from nvidia-smi
+                            already = any(
+                                "nvidia" in g.lower() and "nvidia" in nl
+                                for g in gpus)
+                            if not already and name not in gpus:
+                                gpus.append(name[:38])
+                except Exception:
+                    pass
+
+                # 3) wmic fallback (Win10)
+                if not gpus:
+                    try:
+                        r = subprocess.run(
+                            ["wmic","path","win32_VideoController","get","name","/value"],
+                            capture_output=True, text=True, timeout=4)
+                        for line in r.stdout.splitlines():
+                            if "Name=" in line:
+                                name = line.split("=",1)[1].strip()[:38]
+                                if name and name not in gpus:
+                                    gpus.append(name)
+                    except Exception:
+                        pass
+
+                if gpus:
+                    return " / ".join(gpus)
+
         except Exception:
             pass
         return "N/A"
@@ -1657,29 +1826,55 @@ class SysData:
         try:
             sys_name = platform.system()
             if sys_name == "Windows":
-                r = subprocess.run(
-                    ["wmic", "desktopmonitor", "get",
-                     "ScreenWidth,ScreenHeight", "/value"],
-                    capture_output=True, text=True, timeout=5)
-                w = h = ""
-                for line in r.stdout.splitlines():
-                    line = line.strip()
-                    if line.startswith("ScreenWidth="):
-                        w = line.split("=",1)[1].strip()
-                    elif line.startswith("ScreenHeight="):
-                        h = line.split("=",1)[1].strip()
-                if w and h and w != "0":
-                    res = f"{w}x{h}"
-                else:
-                    # Fallback via PowerShell
-                    ps = ("[System.Windows.Forms.Screen]::PrimaryScreen.Bounds |"
-                          " ForEach-Object { $_.Width.ToString()+'x'+$_.Height.ToString() }")
-                    r2 = subprocess.run(
-                        ["powershell", "-NoProfile", "-Command", ps],
-                        capture_output=True, text=True, timeout=5)
-                    v = r2.stdout.strip()
-                    if "x" in v:
-                        res = v
+                # 1) ctypes — most reliable, works on Win10 and Win11
+                try:
+                    import ctypes
+                    user32 = ctypes.windll.user32
+                    # Call SetProcessDPIAware so we get physical pixels, not scaled
+                    try:
+                        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+                    except Exception:
+                        try: user32.SetProcessDPIAware()
+                        except Exception: pass
+                    w = user32.GetSystemMetrics(0)   # SM_CXSCREEN
+                    h = user32.GetSystemMetrics(1)   # SM_CYSCREEN
+                    if w > 0 and h > 0:
+                        res = f"{w}x{h}"
+                except Exception:
+                    pass
+
+                # 2) PowerShell via .NET Screen class
+                if res == "N/A":
+                    try:
+                        ps = ("[System.Windows.Forms.Screen]::PrimaryScreen.Bounds |"
+                              " ForEach-Object { $_.Width.ToString()+'x'+$_.Height.ToString() }")
+                        r2 = subprocess.run(
+                            ["powershell", "-NoProfile", "-Command", ps],
+                            capture_output=True, text=True, timeout=5)
+                        v = r2.stdout.strip()
+                        if "x" in v:
+                            res = v
+                    except Exception:
+                        pass
+
+                # 3) wmic desktopmonitor (Win10 fallback)
+                if res == "N/A":
+                    try:
+                        r = subprocess.run(
+                            ["wmic", "desktopmonitor", "get",
+                             "ScreenWidth,ScreenHeight", "/value"],
+                            capture_output=True, text=True, timeout=5)
+                        w = h = ""
+                        for line in r.stdout.splitlines():
+                            line = line.strip()
+                            if line.startswith("ScreenWidth="):
+                                w = line.split("=",1)[1].strip()
+                            elif line.startswith("ScreenHeight="):
+                                h = line.split("=",1)[1].strip()
+                        if w and h and w != "0":
+                            res = f"{w}x{h}"
+                    except Exception:
+                        pass
             elif sys_name == "Darwin":
                 r = subprocess.run(
                     ["system_profiler", "SPDisplaysDataType"],
@@ -1689,20 +1884,77 @@ class SysData:
                         res = line.split(":",1)[1].strip().split(" @")[0]
                         break
             else:
-                # Linux: try xrandr, then xdpyinfo
-                try:
-                    r = subprocess.run(["xrandr","--current"],
-                                       capture_output=True, text=True, timeout=3)
-                    for line in r.stdout.splitlines():
-                        parts = line.split()
-                        if " connected" in line and len(parts) >= 3:
-                            # e.g. "HDMI-1 connected 1920x1080+0+0"
-                            import re as _re
-                            m = _re.search(r'\d{3,}x\d{3,}', line)
-                            if m:
-                                res = m.group(); break
-                except Exception:
-                    pass
+                # Linux: Wayland first, then X11 (xrandr / xdpyinfo), then tkinter
+                import re as _re
+
+                # --- Wayland paths ---
+                if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("XDG_SESSION_TYPE","").lower() == "wayland":
+
+                    # wlr-randr (wlroots compositors: Sway, Hyprland, etc.)
+                    try:
+                        r = subprocess.run(["wlr-randr"],
+                                           capture_output=True, text=True, timeout=3)
+                        if r.returncode == 0:
+                            for line in r.stdout.splitlines():
+                                m = _re.search(r'(\d{3,}x\d{3,})', line)
+                                if m:
+                                    res = m.group(1); break
+                    except Exception:
+                        pass
+
+                    # kscreen-doctor (KDE/KWin)
+                    if res == "N/A":
+                        try:
+                            r = subprocess.run(["kscreen-doctor", "-o"],
+                                               capture_output=True, text=True, timeout=3)
+                            if r.returncode == 0:
+                                for line in r.stdout.splitlines():
+                                    m = _re.search(r'(\d{3,}x\d{3,})', line)
+                                    if m:
+                                        res = m.group(1); break
+                        except Exception:
+                            pass
+
+                    # gnome-randr / mutter (GNOME on Wayland)
+                    if res == "N/A":
+                        try:
+                            r = subprocess.run(["gnome-randr"],
+                                               capture_output=True, text=True, timeout=3)
+                            if r.returncode == 0:
+                                for line in r.stdout.splitlines():
+                                    m = _re.search(r'(\d{3,}x\d{3,})', line)
+                                    if m:
+                                        res = m.group(1); break
+                        except Exception:
+                            pass
+
+                    # /sys/class/drm — kernel always knows the mode
+                    if res == "N/A":
+                        try:
+                            drm_base = "/sys/class/drm"
+                            for card in sorted(os.listdir(drm_base)):
+                                modes_path = os.path.join(drm_base, card, "modes")
+                                if os.path.exists(modes_path):
+                                    with open(modes_path) as mf:
+                                        first = mf.readline().strip()
+                                    if first:
+                                        res = first; break
+                        except Exception:
+                            pass
+
+                # --- X11 paths ---
+                if res == "N/A":
+                    try:
+                        r = subprocess.run(["xrandr","--current"],
+                                           capture_output=True, text=True, timeout=3)
+                        for line in r.stdout.splitlines():
+                            if " connected" in line:
+                                m = _re.search(r'(\d{3,}x\d{3,})', line)
+                                if m:
+                                    res = m.group(1); break
+                    except Exception:
+                        pass
+
                 if res == "N/A":
                     try:
                         r = subprocess.run(["xdpyinfo"],
@@ -1710,6 +1962,20 @@ class SysData:
                         for line in r.stdout.splitlines():
                             if "dimensions:" in line:
                                 res = line.split()[1]; break
+                    except Exception:
+                        pass
+
+                # --- tkinter fallback (works on both X11 and some Wayland via XWayland) ---
+                if res == "N/A":
+                    try:
+                        import tkinter as _tk
+                        _root = _tk.Tk()
+                        _root.withdraw()
+                        w = _root.winfo_screenwidth()
+                        h = _root.winfo_screenheight()
+                        _root.destroy()
+                        if w > 0 and h > 0:
+                            res = f"{w}x{h}"
                     except Exception:
                         pass
         except Exception:
@@ -1727,22 +1993,54 @@ class SysData:
                                    capture_output=True, text=True, timeout=5)
                 if r.returncode == 0:
                     count = f"{len(r.stdout.strip().splitlines())} (brew)"
-            elif sys_name == "Windows":
-                r = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command",
-                     "Get-Package | Measure-Object | Select-Object -ExpandProperty Count"],
-                    capture_output=True, text=True, timeout=8)
-                v = r.stdout.strip()
-                if v.isdigit():
-                    count = f"{v} (winget)"
-                else:
-                    # Fallback: count winget list lines
-                    r2 = subprocess.run(["winget","list"],
-                                        capture_output=True, text=True, timeout=8)
-                    lines = [l for l in r2.stdout.splitlines()
-                             if l.strip() and not l.startswith("-") and not l.startswith("Name")]
-                    if lines:
-                        count = f"{len(lines)} (winget)"
+            if sys_name == "Windows":
+                counts = []
+                # winget (fast with --disable-interactivity)
+                try:
+                    r = subprocess.run(
+                        ["winget", "list", "--disable-interactivity",
+                         "--accept-source-agreements"],
+                        capture_output=True, text=True, timeout=10)
+                    if r.returncode == 0:
+                        # Skip header lines (contain dashes separator) and blanks
+                        lines = [l for l in r.stdout.splitlines()
+                                 if l.strip() and not l.startswith("-")
+                                 and not all(c in "- \t" for c in l)]
+                        # First line is usually the header row "Name  Id  Version…"
+                        pkg_lines = lines[1:] if lines else []
+                        if pkg_lines:
+                            counts.append(f"{len(pkg_lines)} (winget)")
+                except Exception:
+                    pass
+                # scoop (if installed)
+                try:
+                    r = subprocess.run(["scoop", "list"],
+                                       capture_output=True, text=True, timeout=8,
+                                       shell=True)
+                    if r.returncode == 0:
+                        lines = [l for l in r.stdout.splitlines()
+                                 if l.strip() and not l.startswith(" Name")]
+                        if lines:
+                            counts.append(f"{len(lines)} (scoop)")
+                except Exception:
+                    pass
+                # chocolatey (if installed)
+                try:
+                    r = subprocess.run(["choco", "list", "--local-only", "--limit-output"],
+                                       capture_output=True, text=True, timeout=8)
+                    if r.returncode == 0:
+                        lines = [l for l in r.stdout.strip().splitlines() if l.strip()]
+                        if lines:
+                            # Last line is summary "N packages installed"
+                            try:
+                                n = int(lines[-1].split()[0])
+                                counts.append(f"{n} (choco)")
+                            except Exception:
+                                counts.append(f"{len(lines)} (choco)")
+                except Exception:
+                    pass
+                if counts:
+                    count = ", ".join(counts)
             elif sys_name == "Linux":
                 for cmd, flag in [
                     ("dpkg-query", ["-l"]),
@@ -2015,7 +2313,7 @@ def draw_spectrum(win, y, x, h, w, spectrum, col_low=P_CYAN, col_mid=P_BLUE, col
 # ══════════════════════════════════════════════════════════════════════════════
 #  APP STATE
 # ══════════════════════════════════════════════════════════════════════════════
-VIEWS = ["DASHBOARD","CLOCK + MUSIC","FOCUS","NEOFETCH","NETWORK","LIBRARY","CALENDAR","VIDEO"]
+VIEWS = ["DASHBOARD","CLOCK + MUSIC","FOCUS","NEOFETCH","NETWORK","LIBRARY","CALENDAR","VIDEO","NEWS & STOCKS"]
 
 class State:
     def __init__(self):
@@ -2080,6 +2378,7 @@ def v_dashboard(win, W, H):
     now = datetime.datetime.now()
     sd  = SD.snap()
 
+    # ── Row 1: Clock (left) + Status (right) ─────────────────────────────────
     cw = W//2 - 1
     box(win, 1, 0, 9, cw, "CLOCK")
     ts = now.strftime("%H:%M")
@@ -2102,39 +2401,93 @@ def v_dashboard(win, W, H):
     put(win, 6, rx+2, f"NET  {sd['ssid'][:rw-8]}", cp(P_DIM))
     put(win, 7, rx+2, f"I/O  ↓{kbfmt(sd['net_dn'])} ↑{kbfmt(sd['net_up'])}", cp(P_DIM))
 
-    reserved   = 10 + 1 + 5 + 6 + 2 + 1
-    todo_inner = max(2, H - reserved)
+    # ── Row 2: TODOS (left) + NEWS & STOCKS (right) — split 50/50 ────────────
+    mid_start = 11
+    # Cap todos at a fixed height to make room; remaining space goes to news
+    # Available rows: from row 11 to (H - 12) for the dual panel
+    dual_avail  = max(6, H - mid_start - 11)   # leave 11 rows at bottom
+    todo_h_max  = max(4, dual_avail // 2 + 1)  # todos gets top ~half
+    news_h_max  = max(4, dual_avail - todo_h_max)
+
+    lw = W // 2        # left column width
+    rw2 = W - lw - 1  # right column width
+
+    # ── TODOS (left) ─────────────────────────────────────────────────────────
+    todo_inner = max(2, todo_h_max - 2)
     todo_h     = todo_inner + 2 + (1 if ST.todo_add else 0)
-    box(win, 11, 0, todo_h, W-1,
-        "TODOS  [a]=add  [d]=del  [j/k]=nav  [ENTER]=check")
+    box(win, mid_start, 0, todo_h, lw,
+        "TODOS  [a]=add  [d]=del  [ENTER]=check")
     visible_n = todo_inner
     start = max(0, ST.todo_cur - visible_n + 1) if len(ST.todos) > visible_n else 0
 
     for i, (done, text) in enumerate(ST.todos[start:start+visible_n]):
         ri  = start+i
-        ry  = 12+i
+        ry  = mid_start+1+i
         sel = (ri == ST.todo_cur)
-        put(win, ry, 1, " "*(W-3),
+        put(win, ry, 1, " "*(lw-2),
             cp(P_DIM)|(curses.A_REVERSE if sel else 0))
         tick_c = "✓" if done else " "
         col    = P_DIM if done else (P_AMBER if sel else P_HI)
         line   = f" {'▶' if sel else ' '} [{tick_c}] {text}"
-        put(win, ry, 1, line[:W-3],
+        put(win, ry, 1, line[:lw-2],
             cp(col)|(curses.A_REVERSE if sel else 0))
     if len(ST.todos) > visible_n:
-        put(win, 12, W-7, f"{ST.todo_cur+1}/{len(ST.todos)}", cp(P_DIM))
+        put(win, mid_start+1, lw-8, f"{ST.todo_cur+1}/{len(ST.todos)}", cp(P_DIM))
     if ST.todo_add:
-        put(win, 12+visible_n, 2,
+        put(win, mid_start+1+visible_n, 2,
             f" + {ST.todo_buf}{'█' if int(time.time()*2)%2 else ' '}", cp(P_AMBER))
 
-    by = 11 + todo_h + 1
+    # ── NEWS & STOCKS (right of todos) ───────────────────────────────────────
+    code   = get_user_country() or "GLOBAL"
+    c_info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+    flag   = c_info["flag"]
+    items  = get_news_items()
+    stocks = get_stock_data()
+    wl     = load_stock_watchlist()
+
+    ns_title = f"NEWS & STOCKS  {flag} [→ view 9]"
+    box(win, mid_start, lw, todo_h, rw2, ns_title)
+
+    # Stock ticker strip (1 line)
+    sx = lw + 2; sy = mid_start + 1
+    if stocks and wl:
+        max_tickers = max(1, (rw2 - 4) // 19)
+        for sym in wl[:max_tickers]:
+            info = stocks.get(sym.upper())
+            if info:
+                arrow   = "▲" if info["change"] > 0 else ("▼" if info["change"] < 0 else "─")
+                col     = P_GREEN if info["change"] >= 0 else P_RED
+                s       = f"{sym} {arrow}{abs(info['pct']):.1f}%  "
+                if sx + len(s) >= lw + rw2 - 1: break
+                put(win, sy, sx, s, cp(col, bold=True))
+                sx += len(s)
+        put(win, sy, lw + rw2 - 2, "", cp(P_DIM))   # cap
+    put(win, sy + 1, lw + 1, "─" * (rw2 - 2), cp(P_BOX))
+
+    # News headlines (remaining rows)
+    news_start_y = sy + 2
+    news_rows    = todo_h - 4
+    src_cols     = {"Reuters": P_CYAN, "BBC News": P_RED, "AP News": P_AMBER,
+                    "Al Jazeera": P_GREEN, "Times of India": P_AMBER, "NDTV": P_AMBER,
+                    "Hindu": P_GREEN, "Guardian": P_CYAN, "DW": P_BLUE,
+                    "NHK World": P_PINK, "CBC": P_RED, "ABC AU": P_GREEN}
+    for i, item in enumerate(items[:news_rows]):
+        ny2 = news_start_y + i
+        if ny2 >= mid_start + todo_h - 1: break
+        sc   = src_cols.get(item["source"], P_BLUE)
+        src  = f"[{item['source'][:6]}]"
+        line = f"{src} {item['title']}"
+        put(win, ny2, lw+2, line[:rw2-3], cp(P_HI if i == 0 else P_MID))
+
+    # ── Pomodoro (left) + Next Event (right) below todos ─────────────────────
+    by = mid_start + todo_h + 1
     hw = W//2 - 1
     box(win, by, 0, 5, hw, "POMODORO  [p]=start  [r]=reset")
     pm=int(ST.pomo_secs)//60; ps=int(ST.pomo_secs)%60
     pct=int((1-ST.pomo_secs/max(1,ST.pomo_total))*100)
     pc=P_RED if ST.pomo_phase=="WORK" else P_GREEN
-    sym="▶" if ST.pomo_run else "||"
-    put(win,by+1,2,f" {sym}  {pm:02d}:{ps:02d}  {ST.pomo_phase}",cp(pc,bold=True))
+    sym2="▶" if ST.pomo_run else "||"
+    put(win,by+1,2,f" {sym2}  {pm:02d}:{ps:02d}  {ST.pomo_phase}",cp(pc,bold=True))
     hbar(win,by+2,2,hw-4,pct,pc)
     dots=" ".join("◉" if i<ST.pomo_done else "○" for i in range(8))
     put(win,by+3,2,dots[:hw-4],cp(P_DIM))
@@ -2144,8 +2497,9 @@ def v_dashboard(win, W, H):
     put(win,by+1,hw+3,evtitle,cp(P_HI))
     put(win,by+2,hw+3,evtime, cp(P_DIM))
 
+    # ── Spectrum visualiser ───────────────────────────────────────────────────
     vy = by + 6
-    vis_h = max(3, H - vy - 3)
+    vis_h = max(2, H - vy - 3)
     if vy + vis_h + 1 < H:
         td   = AUDIO.current
         lbl  = f"VISUALIZER  ~ {td['name'][:30]} — {td['artist']}"
@@ -2154,7 +2508,7 @@ def v_dashboard(win, W, H):
         draw_spectrum(win, vy+1, 1, vis_h, W-3, spec)
 
     put(win, H-1, 0,
-        " [ENTER]=check  [p] pomo  [r] reset  [a] add  [d] del  [space]=music  [←→] views  [q] quit ",
+        " [ENTER]=check  [p] pomo  [r] reset  [a] add  [d] del todo  [space]=music  [←→] views  [q] quit ",
         cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2311,16 +2665,25 @@ def v_neofetch(win, W, H):
     net_dn    = sd.get("net_dn",    0.0)
     net_up    = sd.get("net_up",    0.0)
     user      = os.environ.get("USER", os.environ.get("USERNAME", "user"))
-    term_emu  = os.environ.get("TERM_PROGRAM",
-                    os.environ.get("TERM",
-                    os.environ.get("WT_SESSION" and "Windows Terminal" or "", "unknown")))
-    if platform.system() == "Windows" and term_emu in ("unknown", ""):
+    # Terminal emulator detection
+    if platform.system() == "Windows":
         if os.environ.get("WT_SESSION"):
             term_emu = "Windows Terminal"
         elif os.environ.get("TERM_PROGRAM"):
             term_emu = os.environ["TERM_PROGRAM"]
+        elif os.environ.get("ConEmuPID"):
+            term_emu = "ConEmu"
+        elif os.environ.get("CMDER_ROOT"):
+            term_emu = "Cmder"
+        elif os.environ.get("ALACRITTY_SOCKET"):
+            term_emu = "Alacritty"
+        elif os.environ.get("TERM") == "xterm-256color":
+            term_emu = os.environ.get("TERM", "xterm-256color")
         else:
             term_emu = "conhost"
+    else:
+        term_emu = (os.environ.get("TERM_PROGRAM") or
+                    os.environ.get("TERM") or "unknown")
 
     uptime_s = f"{uh}h {um:02d}m" if uh else f"{um}m"
     mem_s    = f"{mem_used:.0f} MiB / {mem_total*1024:.0f} MiB"
@@ -2694,6 +3057,425 @@ def _evs_for_month(d):
     return weeks, ev_map
 
 
+def _cal_draw_header(win, W, H, now, today):
+    """Apple Calendar-style header: month/year left, nav arrows, view tabs right."""
+    # ── Month / Year ──────────────────────────────────────────────────────────
+    month_lbl = CS.date.strftime("%B")
+    year_lbl  = CS.date.strftime("%Y")
+    put(win, 0, 2, month_lbl, cp(P_HI, bold=True))
+    put(win, 0, 2 + len(month_lbl) + 1, year_lbl, cp(P_DIM))
+
+    # ── Today button ──────────────────────────────────────────────────────────
+    today_lbl = " Today "
+    today_x   = len(month_lbl) + len(year_lbl) + 6
+    today_col = cp(P_CYAN) if CS.date != today else cp(P_DIM)
+    put(win, 0, today_x, today_lbl, today_col)
+
+    # ── View-mode tabs (pill style with brackets) ─────────────────────────────
+    tabs     = [("Day","1"), ("Week","2"), ("Month","3"), ("Year","4")]
+    tab_str  = ""
+    tab_pos  = []
+    for name, key in tabs:
+        tab_pos.append((len(tab_str), name))
+        tab_str += f" {name} "
+    tx = W - len(tab_str) - 3
+    put(win, 0, tx - 1, "[", cp(P_BOX))
+    for off, name in tab_pos:
+        active = (CS.mode == name.lower())
+        attr   = cp(P_CYAN, bold=True) | curses.A_REVERSE if active else cp(P_DIM)
+        put(win, 0, tx + off, f" {name} ", attr)
+    put(win, 0, tx + len(tab_str), "]", cp(P_BOX))
+
+    # ── Separator ─────────────────────────────────────────────────────────────
+    put(win, 1, 0, "─" * W, cp(P_BOX))
+
+
+def _cal_draw_overlay(win, W, H):
+    """Shared add/delete/ics overlay panels."""
+    blink = "▌" if int(time.time() * 2) % 2 else " "
+    ow = min(W - 8, 60); ox = (W - ow) // 2; oy = max(2, H // 2 - 6)
+
+    # clear overlay area
+    for r in range(oy, min(oy + 13, H)):
+        try: win.move(r, ox); win.clrtoeol()
+        except: pass
+
+    # rounded-corner box
+    box(win, oy, ox, 12, ow)
+
+    if CS.add_mode:
+        step  = CS.add_step
+        title = "  ✦ New Event"
+        put(win, oy,     ox + 2, title, cp(P_CYAN, bold=True))
+        put(win, oy + 1, ox + 1, "─" * (ow - 2), cp(P_BOX))
+
+        # Step labels with active highlight
+        d_str  = (CS.add_date or CS.date).strftime("%A, %d %B %Y")
+        t_str  = f"{CS.add_hour:02d}:{CS.add_min:02d}"
+        t_buf  = CS.add_title
+
+        def _field(row, label, value, active, hint=""):
+            lattr = cp(P_AMBER, bold=True) if active else cp(P_DIM)
+            vattr = (cp(P_HI, bold=True) | curses.A_UNDERLINE) if active else cp(P_MID)
+            put(win, row, ox + 3, f"{label:<8}", lattr)
+            put(win, row, ox + 12, value + (blink if active else ""), vattr)
+            if active and hint:
+                put(win, row + 1, ox + 12, hint, cp(P_DIM))
+
+        _field(oy + 3, "Date",  d_str, step == 0, "← → day  Shift+←→ month  Enter ▶")
+        _field(oy + 5, "Time",  t_str, step == 1, "↑ ↓ hour  ← → minute  Enter ▶")
+        _field(oy + 7, "Title", t_buf, step == 2)
+
+        put(win, oy + 10, ox + 1, "─" * (ow - 2), cp(P_BOX))
+        save_lbl = "Enter · Save" if step == 2 else "Enter · Next"
+        put(win, oy + 11, ox + 3, save_lbl, cp(P_GREEN if step == 2 else P_DIM))
+        put(win, oy + 11, ox + 20, "Esc · Cancel", cp(P_DIM))
+
+    elif CS.ics_mode:
+        put(win, oy,     ox + 2, "  ⟳ Connect Calendar", cp(P_CYAN, bold=True))
+        put(win, oy + 1, ox + 1, "─" * (ow - 2), cp(P_BOX))
+        put(win, oy + 3, ox + 3, "Google: Settings → Secret address in iCal format", cp(P_DIM))
+        put(win, oy + 4, ox + 3, "Apple:  File → Export → ~/.terminal_standby.ics", cp(P_DIM))
+        put(win, oy + 6, ox + 3, "URL / path:", cp(P_DIM))
+        put(win, oy + 7, ox + 3, f"{CS.ics_buf}{blink}", cp(P_HI, bold=True))
+        put(win, oy + 9, ox + 1, "─" * (ow - 2), cp(P_BOX))
+        put(win, oy + 10, ox + 3, "Enter · Sync     Esc · Cancel", cp(P_DIM))
+
+    elif CS.del_mode:
+        ev = CS.local_evs[CS.del_idx] if 0 <= CS.del_idx < len(CS.local_evs) else None
+        put(win, oy,     ox + 2, "  ✕ Delete Event", cp(P_RED, bold=True))
+        put(win, oy + 1, ox + 1, "─" * (ow - 2), cp(P_BOX))
+        if ev:
+            put(win, oy + 3, ox + 3, ev.get("title", "?")[: ow - 6], cp(P_HI, bold=True))
+            put(win, oy + 4, ox + 3, ev.get("dt",    "")[: ow - 6], cp(P_DIM))
+        put(win, oy + 6, ox + 1, "─" * (ow - 2), cp(P_BOX))
+        put(win, oy + 7, ox + 3, "y · Confirm Delete    n / Esc · Cancel", cp(P_DIM))
+
+
+def _cal_view_day(win, W, H, now, today, CY, CH):
+    """Apple-Calendar day view: left time gutter, events in right panel, now-line."""
+    evs      = _evs_for_day(CS.date)
+    is_today = (CS.date == today)
+
+    # ── Day label ─────────────────────────────────────────────────────────────
+    dow   = CS.date.strftime("%A").upper()
+    dnum  = CS.date.strftime("%d")
+    drest = CS.date.strftime("%B %Y")
+    if is_today:
+        put(win, CY, 2, dow, cp(P_DIM))
+        put(win, CY, 2 + len(dow) + 1, dnum, cp(P_AMBER, bold=True) | curses.A_REVERSE)
+        put(win, CY, 2 + len(dow) + 1 + len(dnum) + 1, drest, cp(P_DIM))
+        put(win, CY, 2 + len(dow) + 1 + len(dnum) + 1 + len(drest) + 2,
+            "— today", cp(P_AMBER))
+    else:
+        lbl = f"{dow}  {dnum}  {drest}"
+        put(win, CY, 2, lbl, cp(P_MID))
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    FIRST_H, LAST_H = 0, 23
+    n_hours   = LAST_H - FIRST_H + 1
+    body_h    = CH - 2
+    slot_h    = max(1, body_h // n_hours)
+    GUTTER    = 6          # "HH:MM" width
+    EV_X      = GUTTER + 2
+    EV_W      = W - EV_X - 2
+
+    # vertical gutter rule
+    for r in range(CY + 1, CY + CH):
+        try: win.addch(r, GUTTER + 1, curses.ACS_VLINE, cp(P_BOX))
+        except: pass
+
+    now_y = None
+    for hi, hour in enumerate(range(FIRST_H, LAST_H + 1)):
+        hy = CY + 1 + hi * slot_h
+        if hy >= CY + CH: break
+
+        is_now_hour = is_today and now.hour == hour
+        hcol = P_AMBER if is_now_hour else P_DIM
+
+        # show time label every 2 hours or if slot_h > 1
+        if slot_h >= 2 or hour % 2 == 0:
+            put(win, hy, 0, f"{hour:02d}:00", cp(hcol))
+
+        # half-hour tick
+        if slot_h >= 2:
+            half_y = hy + slot_h // 2
+            if half_y < CY + CH:
+                put(win, half_y, 2, f"{hour:02d}:30", cp(P_BOX))
+                put(win, half_y, GUTTER + 2, "╌" * min(20, EV_W), cp(P_BOX))
+
+        # hour rule
+        put(win, hy, GUTTER + 2, "─" * min(EV_W, W - GUTTER - 3), cp(P_BOX))
+
+        # now indicator
+        if is_now_hour and slot_h >= 1:
+            frac   = (now.minute * 60 + now.second) / 3600
+            now_y  = hy + int(frac * slot_h)
+            now_y  = min(now_y, CY + CH - 1)
+            indicator = "▶" + "─" * min(EV_W - 1, W - EV_X - 3)
+            put(win, now_y, GUTTER + 1, indicator, cp(P_RED, bold=True))
+
+        # events for this hour
+        hour_evs = [(s, e, t) for s, e, t in evs if s.hour == hour]
+        for ei, (s, e, t) in enumerate(hour_evs):
+            ey = hy + ei
+            if ey >= CY + CH: break
+            g_idx = evs.index((s, e, t))
+            sel   = (g_idx == CS.cur_ev)
+            past  = s < now
+            ecol  = P_AMBER if sel else (P_DIM if past else P_CYAN)
+            is_local = any(
+                lev.get("title") == t and
+                lev.get("dt", "").startswith(s.strftime("%Y-%m-%d"))
+                for lev in CS.local_evs
+            )
+            # event pill
+            marker  = "●" if is_local else "○"
+            time_s  = s.strftime("%H:%M")
+            ev_text = f" {marker} {time_s}  {t}"[:EV_W]
+            if sel:
+                # draw full-width highlight bar
+                put(win, ey, EV_X, " " * min(EV_W, W - EV_X - 1),
+                    cp(P_CYAN) | curses.A_REVERSE)
+                put(win, ey, EV_X, ev_text, cp(P_HI, bold=True) | curses.A_REVERSE)
+                put(win, ey, GUTTER + 1, "▶", cp(P_AMBER, bold=True))
+            else:
+                put(win, ey, EV_X, ev_text, cp(ecol, bold=(not past)))
+
+    if not evs:
+        centre(win, CY + CH // 2,     "No events scheduled", cp(P_DIM))
+        centre(win, CY + CH // 2 + 1, "press  a  to add", cp(P_DIM))
+
+
+def _cal_view_week(win, W, H, now, today, CY, CH):
+    """Apple-Calendar week view: day columns with time gutter, event pills."""
+    week, ev_map = _evs_for_week(CS.date)
+    GUTTER  = 6
+    n_cols  = 7
+    col_w   = max(4, (W - GUTTER - 1) // n_cols)
+    FIRST_H, LAST_H = 7, 22
+    n_hours = LAST_H - FIRST_H + 1
+    body_h  = CH - 4          # rows for time grid
+    slot_h  = max(1, body_h // n_hours)
+
+    # ── Column headers ────────────────────────────────────────────────────────
+    for i, d in enumerate(week):
+        x    = GUTTER + 1 + i * col_w
+        is_t = (d == today)
+        dow  = d.strftime("%a").upper()
+        num  = str(d.day)
+        if is_t:
+            put(win, CY,     x, dow, cp(P_DIM))
+            # circle today's date number
+            put(win, CY + 1, x, f"[{num}]", cp(P_AMBER, bold=True))
+            put(win, CY + 2, x, "─" * (col_w - 1), cp(P_AMBER))
+        elif d == CS.date:
+            put(win, CY,     x, dow, cp(P_DIM))
+            put(win, CY + 1, x, num, cp(P_CYAN, bold=True))
+        else:
+            wknd = (d.weekday() >= 5)
+            put(win, CY,     x, dow, cp(P_BOX if wknd else P_DIM))
+            put(win, CY + 1, x, num, cp(P_BOX if wknd else P_MID))
+
+    # header rule
+    put(win, CY + 2, GUTTER + 1, "─" * (n_cols * col_w), cp(P_BOX))
+
+    # ── Time gutter + column dividers ─────────────────────────────────────────
+    for hi, hour in enumerate(range(FIRST_H, LAST_H + 1)):
+        hy = CY + 3 + hi * slot_h
+        if hy >= CY + CH: break
+        is_now_h = (CS.date.weekday() < 7) and now.date() in week and now.hour == hour
+        hcol = P_AMBER if (now.date() in week and now.hour == hour) else P_DIM
+        if slot_h >= 2 or hour % 2 == 0:
+            put(win, hy, 0, f"{hour:02d}:00", cp(hcol))
+        put(win, hy, GUTTER, "┤", cp(P_BOX))
+        # horizontal hour rule across all columns
+        put(win, hy, GUTTER + 1, "─" * (n_cols * col_w), cp(P_BOX))
+
+    # vertical column dividers
+    for i in range(1, n_cols):
+        x = GUTTER + i * col_w
+        for r in range(CY + 2, CY + CH):
+            try: win.addch(r, x, curses.ACS_VLINE, cp(P_BOX))
+            except: pass
+
+    # now-line
+    if now.date() in week:
+        day_idx = week.index(now.date())
+        frac    = (now.hour - FIRST_H + now.minute / 60) / n_hours
+        now_y   = CY + 3 + int(frac * body_h)
+        now_y   = max(CY + 3, min(now_y, CY + CH - 1))
+        nx      = GUTTER + 1 + day_idx * col_w
+        put(win, now_y, nx, "▶" + "─" * (col_w - 2), cp(P_RED, bold=True))
+
+    # ── Events ────────────────────────────────────────────────────────────────
+    for i, d in enumerate(week):
+        x    = GUTTER + 1 + i * col_w
+        devs = ev_map.get(d, [])
+        is_t = (d == today)
+        for ri, (s, t) in enumerate(devs):
+            frac   = (s.hour - FIRST_H + s.minute / 60) / n_hours
+            ey     = CY + 3 + int(frac * body_h)
+            ey     = max(CY + 3, min(ey, CY + CH - 1))
+            past   = s < now
+            is_t_d = (d == today)
+            ecol   = P_DIM if past else (P_CYAN if is_t_d else P_BLUE)
+            txt    = f"·{s.strftime('%H:%M')} {t}"[:col_w - 1]
+            if not past:
+                put(win, ey, x, " " * (col_w - 1), cp(ecol) | curses.A_REVERSE)
+                put(win, ey, x, txt, cp(P_HI, bold=True) | curses.A_REVERSE)
+            else:
+                put(win, ey, x, txt, cp(ecol))
+
+
+def _cal_view_month(win, W, H, now, today, CY, CH):
+    """Apple-Calendar month grid with event dots and first-event preview."""
+    weeks, ev_map = _evs_for_month(CS.date)
+    col_w     = (W - 1) // 7
+    n_weeks   = len(weeks)
+    row_h     = max(3, (CH - 3) // max(1, n_weeks))
+    day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+
+    # ── Day-of-week header ────────────────────────────────────────────────────
+    for i, dn in enumerate(day_names):
+        wknd = (i >= 5)
+        col  = P_BOX if wknd else P_DIM
+        put(win, CY, 1 + i * col_w, dn, cp(col))
+    put(win, CY + 1, 0, "─" * W, cp(P_BOX))
+
+    # ── Week rows ─────────────────────────────────────────────────────────────
+    for wi, week in enumerate(weeks):
+        wy = CY + 2 + wi * row_h
+
+        # horizontal week rule (below each row except last)
+        if wi > 0:
+            put(win, wy - 1, 0, "─" * W, cp(P_BOX))
+
+        for di, d in enumerate(week):
+            x = 1 + di * col_w
+            if d is None:
+                continue
+
+            in_month = (d.month == CS.date.month)
+            is_t     = (d == today)
+            is_sel   = (d == CS.date)
+            evs_day  = ev_map.get(d, [])
+            n_ev     = len(evs_day)
+            wknd     = (di >= 5)
+
+            # date number
+            num = str(d.day)
+            if is_t:
+                # Apple-style: white circle around today
+                lbl = f"[{num}]"
+                put(win, wy, x, lbl, cp(P_AMBER, bold=True))
+            elif is_sel:
+                put(win, wy, x, num, cp(P_CYAN, bold=True) | curses.A_UNDERLINE)
+            elif not in_month:
+                put(win, wy, x, num, cp(P_BOX))
+            elif wknd:
+                put(win, wy, x, num, cp(P_DIM))
+            else:
+                put(win, wy, x, num, cp(P_MID))
+
+            # event dots row
+            if n_ev and row_h >= 2:
+                past  = (d < today)
+                dcol  = P_DIM if past else (P_RED if is_t else P_GREEN)
+                # coloured dot per event (up to col_w-3)
+                dots  = ("●" * min(n_ev, 3)).ljust(3)
+                put(win, wy + 1, x, dots[: col_w - 2], cp(dcol, bold=(not past)))
+
+            # first event title preview
+            if row_h >= 3 and evs_day:
+                preview = evs_day[0][: col_w - 1]
+                pcol    = P_DIM if d < today else P_MID
+                put(win, wy + 2, x, preview, cp(pcol))
+
+        # vertical column dividers
+        for ci in range(1, 7):
+            cx = ci * col_w
+            for r in range(wy, min(wy + row_h, CY + CH)):
+                try: win.addch(r, cx, curses.ACS_VLINE, cp(P_BOX))
+                except: pass
+
+
+def _cal_view_year(win, W, H, now, today, CY, CH):
+    """Compact 4×3 mini-month year overview."""
+    import calendar as _cal
+    year   = CS.date.year
+    cols   = 4
+    rows   = 3
+    # each mini-month: 7 chars/col × 7 cols = ~22 wide + 2 padding
+    cell_w = max(22, (W - 2) // cols)
+    cell_h = max(10, (CH - 1) // rows)
+
+    with _CAL_LOCK:
+        evs_all = list(_CAL_EVENTS)
+
+    for mi in range(12):
+        month  = mi + 1
+        gr     = mi // cols
+        gc     = mi % cols
+        ox     = 1 + gc * cell_w
+        oy     = CY + gr * cell_h
+
+        m_name = datetime.date(year, month, 1).strftime("%b").upper()
+        is_cur = (month == CS.date.month and year == CS.date.year)
+        hlbl   = cp(P_CYAN, bold=True) if is_cur else cp(P_DIM, bold=True)
+        put(win, oy, ox, m_name, hlbl)
+
+        # mini day-of-week row
+        dnames = "Mo Tu We Th Fr Sa Su"
+        put(win, oy + 1, ox, dnames[:cell_w - 1], cp(P_BOX))
+
+        # event count per day
+        ev_days = set()
+        for s, e, t in evs_all:
+            if s.year == year and s.month == month:
+                ev_days.add(s.day)
+        # also local events
+        for lev in CS.local_evs:
+            try:
+                dt = datetime.datetime.strptime(lev["dt"][:10], "%Y-%m-%d")
+                if dt.year == year and dt.month == month:
+                    ev_days.add(dt.day)
+            except Exception:
+                pass
+
+        # calendar weeks
+        first_day = datetime.date(year, month, 1)
+        days_in   = _cal.monthrange(year, month)[1]
+        pad       = first_day.weekday()          # Mon=0
+        cal_cells = [None] * pad + list(range(1, days_in + 1))
+        while len(cal_cells) % 7: cal_cells.append(None)
+        cal_weeks = [cal_cells[i:i+7] for i in range(0, len(cal_cells), 7)]
+
+        for wi, wk in enumerate(cal_weeks):
+            wy = oy + 2 + wi
+            if wy >= oy + cell_h: break
+            for di, day in enumerate(wk):
+                if day is None:
+                    continue
+                dx   = ox + di * 3
+                d_obj = datetime.date(year, month, day)
+                is_t  = (d_obj == today)
+                is_s  = (d_obj == CS.date)
+                has_ev= day in ev_days
+
+                num = f"{day:2d}"
+                if is_t:
+                    put(win, wy, dx, num, cp(P_AMBER, bold=True) | curses.A_REVERSE)
+                elif is_s:
+                    put(win, wy, dx, num, cp(P_CYAN, bold=True) | curses.A_UNDERLINE)
+                elif has_ev:
+                    put(win, wy, dx, num, cp(P_GREEN))
+                elif di >= 5:
+                    put(win, wy, dx, num, cp(P_BOX))
+                else:
+                    put(win, wy, dx, num, cp(P_DIM))
+
+
 def v_calendar(win, W, H):
     now   = datetime.datetime.now()
     today = now.date()
@@ -2701,234 +3483,41 @@ def v_calendar(win, W, H):
     if CS.msg and time.time() - CS.msg_time > 4:
         CS.msg = ""
 
-    month_s = CS.date.strftime("%B %Y").upper()
-    put(win, 0, 2, month_s, cp(P_HI, bold=True))
+    # ── Shared header ─────────────────────────────────────────────────────────
+    _cal_draw_header(win, W, H, now, today)
 
-    tabs = [("day","1"), ("week","2"), ("month","3")]
-    tx = W - 28
-    for name, key in tabs:
-        active = (CS.mode == name)
-        lbl = f" {name.upper()} "
-        col = cp(P_CYAN, bold=True) if active else cp(P_DIM)
-        attr = col | (curses.A_UNDERLINE if active else 0)
-        put(win, 0, tx, lbl, attr)
-        tx += len(lbl) + 1
-
-    put(win, 1, 0, "─"*W, cp(P_BOX))
-
-    hint = " j/k · nav    a · add    d · delete    G · sync    t · today    1/2/3 · day/week/month "
+    # ── Status / hint bar ─────────────────────────────────────────────────────
+    hint = " j/k·nav   a·add   d·del   G·sync   t·today   1·Day  2·Week  3·Month  4·Year "
     if CS.msg:
         hcol = P_RED if "ERROR" in CS.msg else P_GREEN
-        put(win, H-1, 0, (" " + CS.msg)[:W], cp(hcol, bold=True))
+        put(win, H - 1, 0, (" " + CS.msg)[: W], cp(hcol, bold=True))
     else:
-        put(win, H-1, 0, hint[:W], cp(P_DIM))
+        put(win, H - 1, 0, hint[: W], cp(P_DIM))
 
-    CY = 2
+    CY = 2    # content start row
     CH = H - 3
 
+    # ── Overlay panels take priority ──────────────────────────────────────────
     if CS.add_mode or CS.ics_mode or CS.del_mode:
-        blink = "▌" if int(time.time()*2)%2 else " "
-        ow = min(W-8, 58); ox = (W-ow)//2; oy = H//2 - 5
-
-        for r in range(oy, oy+11):
-            try: win.move(r, ox); win.clrtoeol()
-            except: pass
-
-        if CS.add_mode:
-            step = CS.add_step
-            put(win, oy,   ox+2, "new event", cp(P_CYAN, bold=True))
-            put(win, oy+1, ox+2, "─"*(ow-4),  cp(P_BOX))
-
-            d_str = CS.add_date.strftime("%Y-%m-%d") if CS.add_date else CS.date.strftime("%Y-%m-%d")
-            f1_attr = (cp(P_AMBER, bold=True) | curses.A_UNDERLINE) if step==0 else cp(P_MID)
-            put(win, oy+3, ox+4, "date   ", cp(P_DIM))
-            put(win, oy+3, ox+11, d_str, f1_attr)
-            if step==0: put(win, oy+3, ox+19, "  ← → day  shift+←→ month  enter→next", cp(P_DIM))
-
-            t_str = f"{CS.add_hour:02d}:{CS.add_min:02d}"
-            f2_attr = (cp(P_AMBER, bold=True) | curses.A_UNDERLINE) if step==1 else cp(P_MID)
-            put(win, oy+5, ox+4, "time   ", cp(P_DIM))
-            put(win, oy+5, ox+11, t_str, f2_attr)
-            if step==1: put(win, oy+5, ox+17, "  ↑↓ hour  ← → minute  enter→next", cp(P_DIM))
-
-            t_buf  = CS.add_title
-            f3_attr = (cp(P_HI, bold=True)) if step==2 else cp(P_MID)
-            put(win, oy+7, ox+4, "title  ", cp(P_DIM))
-            if step==2:
-                put(win, oy+7, ox+11, f"{t_buf}{blink}", f3_attr)
-            else:
-                put(win, oy+7, ox+11, t_buf if t_buf else "─", f3_attr)
-
-            put(win, oy+9, ox+2, "─"*(ow-4), cp(P_BOX))
-            if step==2:
-                put(win, oy+10, ox+4, "enter · save", cp(P_GREEN))
-            else:
-                put(win, oy+10, ox+4, "enter · next field", cp(P_DIM))
-            put(win, oy+10, ox+22, "esc · cancel", cp(P_DIM))
-
-        elif CS.ics_mode:
-            put(win, oy,   ox+2, "connect calendar", cp(P_CYAN, bold=True))
-            put(win, oy+1, ox+2, "─"*(ow-4),         cp(P_BOX))
-            put(win, oy+3, ox+2, "Google Cal: Settings → Secret address in iCal format", cp(P_DIM))
-            put(win, oy+4, ox+2, "Apple Cal:  File → Export → save to ~/.terminal_standby.ics", cp(P_DIM))
-            put(win, oy+6, ox+4, f"{CS.ics_buf}{blink}", cp(P_HI, bold=True))
-            put(win, oy+8, ox+2, "─"*(ow-4),         cp(P_BOX))
-            put(win, oy+9, ox+4, "enter · sync    esc · cancel", cp(P_DIM))
-
-        elif CS.del_mode:
-            ev = CS.local_evs[CS.del_idx] if 0 <= CS.del_idx < len(CS.local_evs) else None
-            put(win, oy,   ox+2, "delete event", cp(P_RED, bold=True))
-            put(win, oy+1, ox+2, "─"*(ow-4),    cp(P_BOX))
-            if ev:
-                put(win, oy+3, ox+4, ev.get("title","?")[:ow-6], cp(P_HI))
-                put(win, oy+4, ox+4, ev.get("dt","")[:ow-6],     cp(P_DIM))
-            put(win, oy+6, ox+2, "─"*(ow-4), cp(P_BOX))
-            put(win, oy+7, ox+4, "y · confirm delete    n / esc · cancel", cp(P_DIM))
+        _cal_draw_overlay(win, W, H)
         return
 
+    # ── View dispatch ─────────────────────────────────────────────────────────
     if CS.mode == "day":
-        evs      = _evs_for_day(CS.date)
-        is_today = (CS.date == today)
-
-        if is_today:
-            dlbl = f"  today  ·  {CS.date.strftime('%A, %d %B')}"
-            put(win, CY, 0, dlbl, cp(P_AMBER, bold=True))
-        else:
-            dlbl = f"  {CS.date.strftime('%A, %d %B %Y')}"
-            put(win, CY, 0, dlbl, cp(P_MID))
-
-        FIRST_H, LAST_H = 7, 22
-        n_hours  = LAST_H - FIRST_H + 1
-        slot_h   = max(1, (CH - 2) // n_hours)
-        time_col = 2
-        ev_col   = 9
-
-        for hi, hour in enumerate(range(FIRST_H, LAST_H+1)):
-            hy = CY + 2 + hi * slot_h
-            if hy >= CY + CH: break
-
-            is_now = is_today and now.hour == hour
-            if slot_h > 1 or (hour % 2 == 0):
-                hcol = P_AMBER if is_now else P_DIM
-                put(win, hy, time_col, f"{hour:02d}", cp(hcol))
-
-            if is_now:
-                put(win, hy, ev_col-1, "▶", cp(P_AMBER, bold=True))
-
-            put(win, hy, ev_col, "·"*2, cp(P_BOX))
-
-            hour_evs = [(s,e,t) for s,e,t in evs if s.hour == hour]
-            for ei, (s, e, t) in enumerate(hour_evs):
-                ey = hy + ei
-                if ey >= CY + CH: break
-                g_idx = evs.index((s,e,t))
-                sel   = (g_idx == CS.cur_ev)
-                upcoming = s >= now
-                ecol  = P_AMBER if sel else (P_CYAN if upcoming else P_DIM)
-                mins  = f":{s.minute:02d}" if s.minute else "   "
-                is_local = any(
-                    lev.get("title") == t and
-                    lev.get("dt","").startswith(s.strftime("%Y-%m-%d"))
-                    for lev in CS.local_evs
-                )
-                marker = "●" if is_local else "○"
-                row_txt = f" {marker} {mins}  {t}"[:W-ev_col-3]
-                put(win, ey, ev_col+2, row_txt, cp(ecol, bold=(sel or upcoming)))
-                if sel:
-                    put(win, ey, ev_col, "▶", cp(P_AMBER, bold=True))
-
-        if not evs:
-            put(win, CY+CH//2,   0, " "*W, 0)
-            centre(win, CY+CH//2,   "nothing scheduled", cp(P_DIM))
-            centre(win, CY+CH//2+1, "press a to add an event", cp(P_DIM))
-
+        _cal_view_day(win, W, H, now, today, CY, CH)
     elif CS.mode == "week":
-        week, ev_map = _evs_for_week(CS.date)
-        col_w = (W - 1) // 7
-
-        for i, d in enumerate(week):
-            x    = 1 + i * col_w
-            is_t = (d == today)
-            name = d.strftime("%a").upper()
-            num  = str(d.day)
-            if is_t:
-                put(win, CY,   x, name, cp(P_DIM))
-                put(win, CY+1, x, num,  cp(P_AMBER, bold=True))
-                put(win, CY+2, x, "──", cp(P_AMBER))
-            else:
-                put(win, CY,   x, name, cp(P_DIM))
-                put(win, CY+1, x, num,  cp(P_MID))
-
-        for i in range(1, 7):
-            x = i * col_w
-            for r in range(CY, CY+CH):
-                try: win.addch(r, x, curses.ACS_VLINE, cp(P_BOX))
-                except: pass
-
-        ev_start_y = CY + 3
-        max_ev_rows = CH - 3
-        for i, d in enumerate(week):
-            x    = 1 + i * col_w
-            devs = ev_map.get(d, [])
-            is_t = (d == today)
-            for ri, (s, t) in enumerate(devs[:max_ev_rows]):
-                ry      = ev_start_y + ri
-                if ry >= CY + CH: break
-                upcoming = s.date() >= today
-                if is_t and upcoming:
-                    ecol = P_CYAN
-                elif upcoming:
-                    ecol = P_MID
-                else:
-                    ecol = P_DIM
-                txt = f"{s.strftime('%H:%M')} {t}"
-                put(win, ry, x, txt[:col_w-1], cp(ecol))
-
+        _cal_view_week(win, W, H, now, today, CY, CH)
     elif CS.mode == "month":
-        weeks, ev_map = _evs_for_month(CS.date)
-        col_w      = (W - 1) // 7
-        row_h      = max(2, (CH - 2) // max(1, len(weeks)))
-        day_names  = ["MON","TUE","WED","THU","FRI","SAT","SUN"]
+        _cal_view_month(win, W, H, now, today, CY, CH)
+    elif CS.mode == "year":
+        _cal_view_year(win, W, H, now, today, CY, CH)
 
-        for i, dn in enumerate(day_names):
-            is_wknd = i >= 5
-            put(win, CY, 1+i*col_w, dn, cp(P_DIM if not is_wknd else P_BOX))
-        put(win, CY+1, 0, "─"*W, cp(P_BOX))
-
-        for wi, week in enumerate(weeks):
-            wy = CY + 2 + wi * row_h
-            for di, d in enumerate(week):
-                x = 1 + di * col_w
-                if d is None:
-                    continue
-                is_t   = (d == today)
-                is_sel = (d == CS.date)
-                evs    = ev_map.get(d, [])
-                n_ev   = len(evs)
-
-                num = str(d.day)
-                if is_t:
-                    put(win, wy, x, num, cp(P_AMBER, bold=True))
-                    put(win, wy, x+len(num), "▾", cp(P_AMBER))
-                elif is_sel:
-                    put(win, wy, x, num, cp(P_CYAN, bold=True))
-                elif di >= 5:
-                    put(win, wy, x, num, cp(P_BOX))
-                else:
-                    put(win, wy, x, num, cp(P_MID))
-
-                if n_ev and row_h >= 2:
-                    dot_c = P_GREEN if d >= today else P_DIM
-                    dots  = "·" * min(n_ev, col_w-4)
-                    put(win, wy+1, x, dots[:col_w-2], cp(dot_c))
-                    if row_h >= 3 and evs:
-                        put(win, wy+2, x, evs[0][:col_w-1], cp(P_DIM))
-
+    # ── No-events nudge ───────────────────────────────────────────────────────
     with _CAL_LOCK:
         n_total = len(_CAL_EVENTS)
     if n_total == 0 and not CS.add_mode and not CS.ics_mode:
-        centre(win, H-2,
-               "no events · press G to connect Google or Apple Calendar",
+        centre(win, H - 2,
+               "no events · press G to connect Google / Apple Calendar",
                cp(P_DIM))
 
 
@@ -3213,22 +3802,29 @@ def handle_key(k):
         if k == ord('1'):   CS.mode = "day"
         elif k == ord('2'): CS.mode = "week"
         elif k == ord('3'): CS.mode = "month"
+        elif k == ord('4'): CS.mode = "year"
         elif k in (ord('j'), curses.KEY_DOWN):
             if CS.mode == "day":
                 evs = _evs_for_day(CS.date)
                 if evs: CS.cur_ev = (CS.cur_ev + 1) % len(evs)
                 else:   CS.date += datetime.timedelta(days=1)
-            else:
-                step = 7 if CS.mode=="week" else 28
-                CS.date += datetime.timedelta(days=step)
+            elif CS.mode == "week":
+                CS.date += datetime.timedelta(days=7)
+            elif CS.mode == "month":
+                CS.date += datetime.timedelta(days=28)
+            elif CS.mode == "year":
+                CS.date = CS.date.replace(year=CS.date.year + 1)
         elif k in (ord('k'), curses.KEY_UP):
             if CS.mode == "day":
                 evs = _evs_for_day(CS.date)
                 if evs: CS.cur_ev = (CS.cur_ev - 1) % len(evs)
                 else:   CS.date -= datetime.timedelta(days=1)
-            else:
-                step = 7 if CS.mode=="week" else 28
-                CS.date -= datetime.timedelta(days=step)
+            elif CS.mode == "week":
+                CS.date -= datetime.timedelta(days=7)
+            elif CS.mode == "month":
+                CS.date -= datetime.timedelta(days=28)
+            elif CS.mode == "year":
+                CS.date = CS.date.replace(year=CS.date.year - 1)
         elif k in (curses.KEY_RIGHT, curses.KEY_LEFT) and CS.mode != "day":
             CS.date += datetime.timedelta(days=1 if k==curses.KEY_RIGHT else -1)
         elif k == ord('t'):
@@ -3260,12 +3856,857 @@ def handle_key(k):
             VIDEO.stop()
             VS.msg = "stopped"; VS.msg_time = time.time()
 
+    elif v == 8:
+        _handle_news_stocks_key(k)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  NEWS & STOCKS ENGINE
+# ══════════════════════════════════════════════════════════════════════════════
+import urllib.request as _ureq
+import html as _html
+
+NEWS_FILE      = os.path.join(os.path.expanduser("~"), ".terminal_standby_news.json")
+STOCKS_FILE    = os.path.join(os.path.expanduser("~"), ".terminal_standby_stocks.json")
+SETTINGS_FILE  = os.path.join(os.path.expanduser("~"), ".terminal_standby_settings.json")
+
+_NEWS_LOCK   = threading.Lock()
+_STOCKS_LOCK = threading.Lock()
+
+_news_items    = []   # list of {"title":str, "source":str, "time":str, "country":str}
+_stock_data    = {}   # symbol -> {"price":float, "change":float, "pct":float, "name":str}
+_news_status   = "Loading news…"
+_stocks_status = "Loading stocks…"
+_news_last     = 0.0
+_stocks_last   = 0.0
+
+NEWS_REFRESH_SECS   = 3600   # 1 hour
+STOCKS_REFRESH_SECS = 300    # 5 minutes
+
+# ── Country database ──────────────────────────────────────────────────────────
+# Each entry: code, flag, display name, [RSS feeds], [default stock tickers]
+COUNTRY_DB = {
+    "US": {
+        "flag": "🇺🇸", "name": "United States",
+        "feeds": [
+            ("Reuters",    "https://feeds.reuters.com/reuters/topNews"),
+            ("AP News",    "https://rsshub.app/apnews/topics/apf-topnews"),
+            ("CNN",        "http://rss.cnn.com/rss/cnn_topstories.rss"),
+            ("NPR",        "https://feeds.npr.org/1001/rss.xml"),
+        ],
+        "stocks": ["AAPL", "MSFT", "GOOGL", "TSLA", "AMZN", "NVDA", "META"],
+        "currency": "USD",
+    },
+    "GB": {
+        "flag": "🇬🇧", "name": "United Kingdom",
+        "feeds": [
+            ("BBC News",   "https://feeds.bbci.co.uk/news/rss.xml"),
+            ("Guardian",   "https://www.theguardian.com/uk/rss"),
+            ("Sky News",   "https://feeds.skynews.com/feeds/rss/home.xml"),
+        ],
+        "stocks": ["BARC.L", "HSBA.L", "BP.L", "VOD.L", "GSK.L", "AZN.L"],
+        "currency": "GBP",
+    },
+    "IN": {
+        "flag": "🇮🇳", "name": "India",
+        "feeds": [
+            ("Times of India", "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"),
+            ("NDTV",           "https://feeds.feedburner.com/ndtvnews-top-stories"),
+            ("Hindu",          "https://www.thehindu.com/news/national/feeder/default.rss"),
+            ("Hindustan Times","https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml"),
+        ],
+        "stocks": ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "WIPRO.NS", "ICICIBANK.NS"],
+        "currency": "INR",
+    },
+    "DE": {
+        "flag": "🇩🇪", "name": "Germany",
+        "feeds": [
+            ("DW",        "https://rss.dw.com/rdf/rss-en-all"),
+            ("Spiegel",   "https://www.spiegel.de/schlagzeilen/index.rss"),
+            ("Reuters DE","https://feeds.reuters.com/reuters/topNews"),
+        ],
+        "stocks": ["SAP.DE", "BMW.DE", "SIE.DE", "ALV.DE", "DTE.DE", "VOW3.DE"],
+        "currency": "EUR",
+    },
+    "FR": {
+        "flag": "🇫🇷", "name": "France",
+        "feeds": [
+            ("France 24", "https://www.france24.com/en/rss"),
+            ("Le Monde",  "https://www.lemonde.fr/rss/une.xml"),
+            ("Reuters",   "https://feeds.reuters.com/reuters/topNews"),
+        ],
+        "stocks": ["MC.PA", "OR.PA", "TTE.PA", "SAN.PA", "AIR.PA", "BNP.PA"],
+        "currency": "EUR",
+    },
+    "JP": {
+        "flag": "🇯🇵", "name": "Japan",
+        "feeds": [
+            ("Japan Times", "https://www.japantimes.co.jp/feed/"),
+            ("NHK World",   "https://www3.nhk.or.jp/nhkworld/en/news/feeds/"),
+            ("Reuters",     "https://feeds.reuters.com/reuters/topNews"),
+        ],
+        "stocks": ["7203.T", "6758.T", "9984.T", "8306.T", "6861.T", "9432.T"],
+        "currency": "JPY",
+    },
+    "AU": {
+        "flag": "🇦🇺", "name": "Australia",
+        "feeds": [
+            ("ABC AU",    "https://www.abc.net.au/news/feed/51120/rss.xml"),
+            ("SMH",       "https://www.smh.com.au/rss/feed.xml"),
+            ("Reuters",   "https://feeds.reuters.com/reuters/topNews"),
+        ],
+        "stocks": ["CBA.AX", "BHP.AX", "ANZ.AX", "WBC.AX", "CSL.AX", "NAB.AX"],
+        "currency": "AUD",
+    },
+    "CA": {
+        "flag": "🇨🇦", "name": "Canada",
+        "feeds": [
+            ("CBC",        "https://www.cbc.ca/cmlink/rss-topstories"),
+            ("Globe Mail", "https://www.theglobeandmail.com/arc/outboundfeeds/rss/category/canada/"),
+            ("Reuters",    "https://feeds.reuters.com/reuters/topNews"),
+        ],
+        "stocks": ["SHOP.TO", "RY.TO", "TD.TO", "BNS.TO", "ENB.TO", "CNR.TO"],
+        "currency": "CAD",
+    },
+    "SG": {
+        "flag": "🇸🇬", "name": "Singapore",
+        "feeds": [
+            ("CNA",          "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml"),
+            ("Straits Times","https://www.straitstimes.com/news/singapore/rss.xml"),
+            ("Reuters",      "https://feeds.reuters.com/reuters/topNews"),
+        ],
+        "stocks": ["D05.SI", "O39.SI", "U11.SI", "Z74.SI", "C6L.SI", "G13.SI"],
+        "currency": "SGD",
+    },
+    "BR": {
+        "flag": "🇧🇷", "name": "Brazil",
+        "feeds": [
+            ("Folha",     "https://feeds.folha.uol.com.br/emcimadahora/rss091.xml"),
+            ("Reuters",   "https://feeds.reuters.com/reuters/topNews"),
+            ("Al Jazeera","https://www.aljazeera.com/xml/rss/all.xml"),
+        ],
+        "stocks": ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "ABEV3.SA"],
+        "currency": "BRL",
+    },
+    "ZA": {
+        "flag": "🇿🇦", "name": "South Africa",
+        "feeds": [
+            ("News24",    "https://feeds.news24.com/articles/news24/TopStories/rss"),
+            ("Reuters",   "https://feeds.reuters.com/reuters/topNews"),
+            ("Al Jazeera","https://www.aljazeera.com/xml/rss/all.xml"),
+        ],
+        "stocks": ["NPN.JO", "AGL.JO", "SOL.JO", "FSR.JO", "SBK.JO"],
+        "currency": "ZAR",
+    },
+    "AE": {
+        "flag": "🇦🇪", "name": "UAE",
+        "feeds": [
+            ("Gulf News",  "https://gulfnews.com/rss"),
+            ("Khaleej",    "https://www.khaleejtimes.com/rss"),
+            ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+        ],
+        "stocks": ["FAB.AD", "ENBD.DU", "EMAAR.DU", "DIB.DU", "ETISALAT.AD"],
+        "currency": "AED",
+    },
+    "NG": {
+        "flag": "🇳🇬", "name": "Nigeria",
+        "feeds": [
+            ("Punch",      "https://punchng.com/feed/"),
+            ("Vanguard",   "https://www.vanguardngr.com/feed/"),
+            ("Reuters",    "https://feeds.reuters.com/reuters/topNews"),
+        ],
+        "stocks": ["DANGCEM.LG", "GTCO.LG", "MTNN.LG", "ZENITHBANK.LG"],
+        "currency": "NGN",
+    },
+    "KR": {
+        "flag": "🇰🇷", "name": "South Korea",
+        "feeds": [
+            ("Korea Herald","http://www.koreaherald.com/rss"),
+            ("Yonhap",      "https://en.yna.co.kr/RSS/news.xml"),
+            ("Reuters",     "https://feeds.reuters.com/reuters/topNews"),
+        ],
+        "stocks": ["005930.KS", "000660.KS", "035420.KS", "005380.KS"],
+        "currency": "KRW",
+    },
+    "CN": {
+        "flag": "🇨🇳", "name": "China",
+        "feeds": [
+            ("CGTN",      "https://www.cgtn.com/subscribe/rss/section/news.xml"),
+            ("Xinhua",    "http://www.xinhuanet.com/english/rss/worldrss.xml"),
+            ("Reuters",   "https://feeds.reuters.com/reuters/topNews"),
+        ],
+        "stocks": ["BABA", "JD", "PDD", "BIDU", "NIO", "XPEV"],
+        "currency": "CNY",
+    },
+    "MX": {
+        "flag": "🇲🇽", "name": "Mexico",
+        "feeds": [
+            ("El Universal","https://www.eluniversal.com.mx/rss.xml"),
+            ("Reuters",     "https://feeds.reuters.com/reuters/topNews"),
+            ("Al Jazeera",  "https://www.aljazeera.com/xml/rss/all.xml"),
+        ],
+        "stocks": ["AMXL.MX", "FEMSAUBD.MX", "WALMEX.MX", "GFNORTEO.MX"],
+        "currency": "MXN",
+    },
+    "GLOBAL": {
+        "flag": "🌍", "name": "Global / International",
+        "feeds": [
+            ("Reuters",    "https://feeds.reuters.com/reuters/topNews"),
+            ("BBC News",   "https://feeds.bbci.co.uk/news/rss.xml"),
+            ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+            ("AP News",    "https://rsshub.app/apnews/topics/apf-topnews"),
+        ],
+        "stocks": ["AAPL", "MSFT", "GOOGL", "TSLA", "AMZN", "NVDA"],
+        "currency": "USD",
+    },
+}
+
+COUNTRY_LIST = sorted(COUNTRY_DB.keys(), key=lambda c: (c == "GLOBAL", COUNTRY_DB[c]["name"]))
+
+
+def load_user_settings():
+    """Load persisted user settings (country, etc.)."""
+    try:
+        with open(SETTINGS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_user_settings(d):
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(d, f, indent=2)
+    except Exception:
+        pass
+
+
+def get_user_country():
+    s = load_user_settings()
+    return s.get("country", "")   # "" means not set yet
+
+
+def set_user_country(code):
+    s = load_user_settings()
+    s["country"] = code
+    save_user_settings(s)
+    # Re-seed watchlist with country defaults if watchlist was never customised
+    wl_path = os.path.join(os.path.expanduser("~"), ".terminal_standby_watchlist.json")
+    if not os.path.exists(wl_path):
+        info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+        save_stock_watchlist(info["stocks"][:])
+
+
+def get_active_feeds():
+    code = get_user_country() or "GLOBAL"
+    info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+    return info["feeds"]
+
+def _strip_tags(s):
+    """Remove XML/HTML tags from a string."""
+    import re
+    return re.sub(r'<[^>]+>', '', s).strip()
+
+
+def _fetch_rss(url, source, limit=5):
+    """Fetch one RSS feed, return list of article dicts."""
+    try:
+        req = _ureq.Request(url, headers={"User-Agent": "TerminalStandBy/3"})
+        with _ureq.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        items = []
+        import re
+        # Extract <item> blocks
+        for block in re.findall(r'<item>(.*?)</item>', raw, re.DOTALL)[:limit]:
+            title_m = re.search(r'<title[^>]*>(.*?)</title>', block, re.DOTALL)
+            date_m  = re.search(r'<pubDate>(.*?)</pubDate>', block, re.DOTALL)
+            title   = _html.unescape(_strip_tags(title_m.group(1))) if title_m else ""
+            pub     = date_m.group(1).strip()[:22] if date_m else ""
+            # Shorten pubDate to just time or "today"
+            try:
+                from email.utils import parsedate_to_datetime as _pdt
+                dt = _pdt(pub)
+                now = datetime.datetime.now(datetime.timezone.utc)
+                diff = now - dt
+                if diff.total_seconds() < 3600:
+                    ts = f"{int(diff.total_seconds()//60)}m ago"
+                elif diff.total_seconds() < 86400:
+                    ts = f"{int(diff.total_seconds()//3600)}h ago"
+                else:
+                    ts = dt.strftime("%b %d")
+            except Exception:
+                ts = pub[:12]
+            if title and len(title) > 4:
+                items.append({"title": title, "source": source, "time": ts})
+        return items
+    except Exception as e:
+        return []
+
+
+def fetch_news_bg():
+    """Background thread: fetch country-specific RSS feeds, merge, save."""
+    global _news_items, _news_status, _news_last
+    _news_status = "Fetching news…"
+    feeds    = get_active_feeds()
+    all_items = []
+    for source, url in feeds:
+        items = _fetch_rss(url, source, limit=7)
+        all_items.extend(items)
+    if all_items:
+        with _NEWS_LOCK:
+            _news_items = all_items
+        try:
+            with open(NEWS_FILE, "w") as f:
+                json.dump(all_items, f, indent=2)
+        except Exception:
+            pass
+        code = get_user_country() or "GLOBAL"
+        flag = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])["flag"]
+        _news_status = f"{flag}  Updated  {datetime.datetime.now().strftime('%H:%M')}"
+    else:
+        try:
+            with open(NEWS_FILE) as f:
+                cached = json.load(f)
+            with _NEWS_LOCK:
+                _news_items = cached
+            _news_status = "Cached"
+        except Exception:
+            _news_status = "No news (check internet)"
+    _news_last = time.time()
+
+
+def get_news_items():
+    with _NEWS_LOCK:
+        return list(_news_items)
+
+
+def _fetch_stock_price(symbol):
+    """Fetch stock price via Yahoo Finance unofficial JSON endpoint."""
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=2d"
+        req = _ureq.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        })
+        with _ureq.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+        meta   = data["chart"]["result"][0]["meta"]
+        price  = float(meta.get("regularMarketPrice") or meta.get("previousClose") or 0)
+        prev   = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
+        change = price - prev
+        pct    = (change / prev * 100) if prev else 0.0
+        name   = meta.get("longName") or meta.get("shortName") or symbol
+        return {"price": price, "change": change, "pct": pct, "name": name[:28]}
+    except Exception:
+        return None
+
+
+def fetch_stocks_bg(symbols):
+    """Background thread: fetch all watched symbols."""
+    global _stock_data, _stocks_status, _stocks_last
+    _stocks_status = "Fetching prices…"
+    new_data = {}
+    for sym in symbols:
+        result = _fetch_stock_price(sym.upper())
+        if result:
+            new_data[sym.upper()] = result
+    if new_data:
+        with _STOCKS_LOCK:
+            _stock_data.update(new_data)
+        try:
+            combined = {}
+            with _STOCKS_LOCK:
+                combined = dict(_stock_data)
+            with open(STOCKS_FILE, "w") as f:
+                json.dump(combined, f, indent=2)
+        except Exception:
+            pass
+        _stocks_status = f"Updated  {datetime.datetime.now().strftime('%H:%M')}"
+    else:
+        _stocks_status = "No data (check internet)"
+    _stocks_last = time.time()
+
+
+def load_stock_watchlist():
+    """Load user's stock watchlist from disk."""
+    path = os.path.join(os.path.expanduser("~"), ".terminal_standby_watchlist.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return ["AAPL", "MSFT", "GOOGL", "TSLA", "AMZN"]
+
+
+def save_stock_watchlist(lst):
+    path = os.path.join(os.path.expanduser("~"), ".terminal_standby_watchlist.json")
+    try:
+        with open(path, "w") as f:
+            json.dump(lst, f)
+    except Exception:
+        pass
+
+
+def get_stock_data():
+    with _STOCKS_LOCK:
+        return dict(_stock_data)
+
+
+# ─── Auto-refresh scheduler ────────────────────────────────────────────────
+def _news_refresh_loop():
+    while True:
+        fetch_news_bg()
+        time.sleep(NEWS_REFRESH_SECS)
+
+def _stocks_refresh_loop():
+    wl = load_stock_watchlist()
+    while True:
+        fetch_stocks_bg(wl)
+        # Reload watchlist each cycle so new additions are picked up
+        wl = load_stock_watchlist()
+        time.sleep(STOCKS_REFRESH_SECS)
+
+# Load cached data immediately on startup
+def _load_cached_news():
+    global _news_items, _news_status
+    try:
+        with open(NEWS_FILE) as f:
+            data = json.load(f)
+        with _NEWS_LOCK:
+            _news_items = data
+        _news_status = "Cached"
+    except Exception:
+        pass
+
+def _load_cached_stocks():
+    global _stock_data, _stocks_status
+    try:
+        with open(STOCKS_FILE) as f:
+            data = json.load(f)
+        with _STOCKS_LOCK:
+            _stock_data = data
+        _stocks_status = "Cached"
+    except Exception:
+        pass
+
+_load_cached_news()
+_load_cached_stocks()
+threading.Thread(target=_news_refresh_loop,   daemon=True).start()
+threading.Thread(target=_stocks_refresh_loop, daemon=True).start()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIEW 9 — NEWS & STOCKS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class NewsStocksState:
+    scroll        = 0        # news scroll offset
+    tab           = 0        # 0=news, 1=stocks, 2=country
+    stock_input   = False    # adding new ticker
+    stock_buf     = ""
+    stock_cur     = 0        # selected row in stocks list
+    country_cur   = 0        # cursor in country picker
+    country_mode  = False    # True = country picker overlay open
+    msg           = ""
+    msg_time      = 0.0
+
+NSS = NewsStocksState()
+
+# Initialise country_cur to match saved country
+def _init_nss_country():
+    code = get_user_country()
+    if code and code in COUNTRY_LIST:
+        try:
+            NSS.country_cur = COUNTRY_LIST.index(code)
+        except ValueError:
+            NSS.country_cur = 0
+
+_init_nss_country()
+
+
+def v_news_stocks(win, W, H):
+    # ── First-run country setup ───────────────────────────────────────────────
+    if not get_user_country():
+        _draw_country_setup(win, W, H)
+        return
+
+    items  = get_news_items()
+    stocks = get_stock_data()
+    wl     = load_stock_watchlist()
+
+    # ── Tab bar ──────────────────────────────────────────────────────────────
+    code = get_user_country()
+    info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+    flag = info["flag"]; cname = info["name"]
+
+    tabs = [("  NEWS  ", 0), ("  STOCKS  ", 1)]
+    tx = 2
+    for lbl, idx in tabs:
+        active = (NSS.tab == idx)
+        attr   = cp(P_CYAN, bold=True) | curses.A_REVERSE if active else cp(P_DIM)
+        put(win, 1, tx, lbl, attr)
+        tx += len(lbl) + 1
+
+    country_lbl = f"  {flag} {cname} "
+    put(win, 1, tx + 2, country_lbl, cp(P_AMBER))
+    put(win, 1, tx + 2 + len(country_lbl) + 1, "[C]=change country", cp(P_DIM))
+    put(win, 2, 0, "─" * W, cp(P_BOX))
+
+    if NSS.country_mode:
+        _draw_country_overlay(win, W, H)
+        return
+
+    if NSS.tab == 0:
+        _draw_news_tab(win, W, H, items)
+    else:
+        _draw_stocks_tab(win, W, H, stocks, wl)
+
+
+def _draw_country_setup(win, W, H):
+    """Full-screen first-run country picker."""
+    centre(win, 1, "  TERMINAL STANDBY — FIRST TIME SETUP  ", cp(P_CYAN, bold=True) | curses.A_BOLD)
+    centre(win, 2, "Select your country to get local news & stock defaults", cp(P_DIM))
+    put(win, 3, 0, "─" * W, cp(P_BOX))
+
+    list_h  = H - 8
+    list_y  = 4
+    n       = len(COUNTRY_LIST)
+    NSS.country_cur = max(0, min(NSS.country_cur, n - 1))
+    start   = max(0, NSS.country_cur - list_h // 2)
+    start   = min(start, max(0, n - list_h))
+
+    box(win, list_y - 1, (W - 44) // 2, list_h + 2, 44, "CHOOSE YOUR COUNTRY  [j/k]=nav  [ENTER]=select")
+
+    for i, code in enumerate(COUNTRY_LIST[start:start + list_h]):
+        ri   = start + i
+        ry   = list_y + i
+        sel  = (ri == NSS.country_cur)
+        info = COUNTRY_DB[code]
+        line = f"  {info['flag']}  {info['name']:<26}  [{code}]"
+        attr = (cp(P_AMBER, bold=True) | curses.A_REVERSE) if sel else cp(P_MID)
+        cx   = (W - 44) // 2 + 1
+        put(win, ry, cx, " " * 42, attr)
+        put(win, ry, cx, line[:42], attr)
+
+    put(win, H - 2, 0, "─" * W, cp(P_BOX))
+    put(win, H - 1, 0,
+        " [j/k/↑↓] navigate  [ENTER] select country  [q] quit ",
+        cp(P_DIM))
+
+
+def _draw_country_overlay(win, W, H):
+    """Country picker overlay (for changing country after setup)."""
+    ow = min(W - 4, 50); ox = (W - ow) // 2; oy = 3
+    oh = H - oy - 3
+    # dim background hint
+    put(win, oy - 1, 0, "─" * W, cp(P_BOX))
+    box(win, oy, ox, oh, ow, f"CHANGE COUNTRY  [j/k]=nav  [ENTER]=select  [ESC]=cancel")
+
+    n      = len(COUNTRY_LIST)
+    list_h = oh - 2
+    NSS.country_cur = max(0, min(NSS.country_cur, n - 1))
+    start  = max(0, NSS.country_cur - list_h // 2)
+    start  = min(start, max(0, n - list_h))
+
+    for i, code in enumerate(COUNTRY_LIST[start:start + list_h]):
+        ri   = start + i
+        ry   = oy + 1 + i
+        sel  = (ri == NSS.country_cur)
+        info = COUNTRY_DB[code]
+        line = f"  {info['flag']}  {info['name']:<24}  [{code:<6}]"
+        attr = (cp(P_AMBER, bold=True) | curses.A_REVERSE) if sel else cp(P_MID)
+        put(win, ry, ox + 1, " " * (ow - 2), attr)
+        put(win, ry, ox + 1, line[:ow - 2], attr)
+
+    put(win, H - 1, 0,
+        " [j/k] navigate  [ENTER] confirm  [ESC] cancel  [←→] views ",
+        cp(P_DIM))
+
+
+def _draw_news_tab(win, W, H, items):
+    # Status line with country info
+    code   = get_user_country() or "GLOBAL"
+    c_info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+    flag   = c_info["flag"]; cname = c_info["name"]
+    put(win, 3, 2, f"[ {flag} {cname}  ·  {_news_status}  ·  refreshes hourly ]", cp(P_DIM))
+    put(win, 4, 0, "─" * W, cp(P_BOX))
+
+    if not items:
+        centre(win, H // 2, "  No news items. Check internet connection.  ", cp(P_AMBER))
+        put(win, H-1, 0, " [1] News  [2] Stocks  [j/k] scroll  [r] refresh  [←→] views ", cp(P_DIM))
+        return
+
+    content_h = H - 7   # rows available for news
+    visible   = []
+    # Each item: title line + source/time line + blank = 3 lines
+    for item in items:
+        visible.append(item)
+
+    # Clamp scroll
+    max_scroll = max(0, len(visible) * 3 - content_h)
+    NSS.scroll = max(0, min(NSS.scroll, max_scroll))
+
+    # Draw news list
+    y      = 5
+    offset = NSS.scroll
+    src_colors = {"Reuters": P_CYAN, "BBC News": P_RED, "AP News": P_AMBER, "Al Jazeera": P_GREEN}
+
+    for i, item in enumerate(visible):
+        title   = item["title"]
+        source  = item["source"]
+        ts      = item["time"]
+        src_col = src_colors.get(source, P_BLUE)
+
+        # 3 virtual lines per item: bullet+title, source·time, blank spacer
+        lines = [
+            (f"  ● {title}", P_HI,    True,    src_col),
+            (f"    ╰ {source}  ·  {ts}", src_col, False, src_col),
+            ("", P_DIM, False, P_DIM),
+        ]
+        for txt, col, bold, _ in lines:
+            if offset > 0:
+                offset -= 1
+                continue
+            if y >= H - 2:
+                break
+            # Subtle alternating row tint
+            if i % 2 == 0:
+                put(win, y, 0, " " * (W - 1), cp(P_DIM))
+            put(win, y, 0, txt[:W - 2], cp(col, bold=bold))
+            y += 1
+        if y >= H - 2:
+            break
+
+    # Scroll indicator
+    if max_scroll > 0:
+        pct = int(NSS.scroll / max_scroll * (H - 7))
+        for sy in range(5, H - 2):
+            put(win, sy, W - 1, "│", cp(P_BOX))
+        put(win, 5 + pct, W - 1, "█", cp(P_DIM))
+
+    put(win, H-1, 0, " [j/k] scroll  [r] refresh  [C] change country  [2] stocks  [←→] views  [q] quit ", cp(P_DIM))
+
+
+def _draw_stocks_tab(win, W, H, stocks, watchlist):
+    code   = get_user_country() or "GLOBAL"
+    c_info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+    flag   = c_info["flag"]; cname = c_info["name"]
+    put(win, 3, 2, f"[ {flag} {cname}  ·  {_stocks_status}  ·  refreshes every 5 min ]", cp(P_DIM))
+    put(win, 4, 0, "─" * W, cp(P_BOX))
+
+    # Fixed column widths that scale with terminal width
+    C_SYM  = 2
+    W_SYM  = 8    # "▶ AAPL  "
+    C_NAME = C_SYM + W_SYM
+    W_NAME = max(16, W - C_NAME - 32)  # flex
+    C_PX   = C_NAME + W_NAME
+    C_CHG  = C_PX  + 13
+    C_PCT  = C_CHG + 13
+
+    hdr_line = (f"{'  SYM':<{W_SYM}}{'NAME':<{W_NAME}}{'PRICE':>12}  {'CHANGE':>10}  {'%':>8}")
+    put(win, 5, C_SYM, hdr_line[:W - 4], cp(P_DIM))
+    put(win, 6, 0, "─" * W, cp(P_BOX))
+
+    y = 7
+    NSS.stock_cur = max(0, min(NSS.stock_cur, max(0, len(watchlist) - 1)))
+
+    for i, sym in enumerate(watchlist):
+        if y >= H - 5:
+            break
+        sel  = (i == NSS.stock_cur)
+        info = stocks.get(sym.upper())
+
+        if info:
+            price  = info["price"]
+            change = info["change"]
+            pct    = info["pct"]
+            name   = info["name"]
+            if change > 0:
+                chg_col = P_GREEN; arrow = "▲"
+            elif change < 0:
+                chg_col = P_RED;   arrow = "▼"
+            else:
+                chg_col = P_MID;   arrow = "─"
+            price_s  = f"${price:>10.2f}"
+            change_s = f"{arrow}{abs(change):>8.2f}"
+            pct_s    = f"{pct:>+7.2f}%"
+        else:
+            name     = "Loading…"
+            price_s  = "          ─"
+            change_s = "          ─"
+            pct_s    = "       ─"
+            chg_col  = P_DIM
+            arrow    = ""
+
+        sym_lbl  = f" {'▶' if sel else ' '} {sym:<6}"
+        name_lbl = name[:W_NAME]
+        row_base = cp(P_AMBER if sel else P_HI, bold=sel)
+        rev      = curses.A_REVERSE if sel else 0
+
+        if sel:
+            put(win, y, 0, " " * (W - 1), cp(P_AMBER) | rev)
+
+        put(win, y, C_SYM,  sym_lbl,                      cp(P_AMBER if sel else P_CYAN, bold=True) | rev)
+        put(win, y, C_NAME, f"{name_lbl:<{W_NAME}}",      cp(P_MID)   | rev)
+        put(win, y, C_PX,   price_s,                       cp(P_HI, bold=True) | rev)
+        if info:
+            put(win, y, C_CHG,  f"  {change_s}",           cp(chg_col, bold=True) | rev)
+            put(win, y, C_PCT,  f"  {pct_s}",              cp(chg_col) | rev)
+        else:
+            put(win, y, C_CHG,  f"  {change_s}",           cp(P_DIM) | rev)
+        y += 1
+
+    # Add / remove panel
+    panel_y = max(y + 1, H - 7)
+    put(win, panel_y, 0, "─" * W, cp(P_BOX))
+
+    blink = "█" if int(time.time() * 2) % 2 else " "
+    if NSS.stock_input:
+        put(win, panel_y + 1, 2, "Add ticker: ", cp(P_DIM))
+        put(win, panel_y + 1, 14, (NSS.stock_buf.upper() + blink)[:W - 17], cp(P_AMBER, bold=True))
+        put(win, panel_y + 2, 2, "ENTER=confirm   ESC=cancel   (e.g. NVDA, INFY.NS, BTC-USD)", cp(P_DIM))
+    else:
+        if NSS.msg and time.time() - NSS.msg_time < 4:
+            col = P_GREEN if "Added" in NSS.msg or "Removed" in NSS.msg else P_RED
+            put(win, panel_y + 1, 2, NSS.msg[:W - 4], cp(col, bold=True))
+        else:
+            put(win, panel_y + 1, 2,
+                f"Watching {len(watchlist)} ticker(s)  ·  [a]=add  [d]=remove selected  [r]=refresh now",
+                cp(P_DIM))
+
+    put(win, H-1, 0, " [j/k] select  [a] add  [d] remove  [D] reset to country defaults  [C] country  [r] refresh  [←→] views ", cp(P_DIM))
+
+
+# ── Key handling for view 8 (News & Stocks) ──────────────────────────────────
+def _handle_news_stocks_key(k):
+    """Handle keypresses for the news/stocks view."""
+    n_countries = len(COUNTRY_LIST)
+
+    # ── First-run country setup (no country set yet) ──────────────────────────
+    if not get_user_country():
+        if k in (ord('j'), curses.KEY_DOWN):
+            NSS.country_cur = min(n_countries - 1, NSS.country_cur + 1)
+        elif k in (ord('k'), curses.KEY_UP):
+            NSS.country_cur = max(0, NSS.country_cur - 1)
+        elif k in (10, 13):
+            code = COUNTRY_LIST[NSS.country_cur]
+            set_user_country(code)
+            # Immediately trigger fresh fetch for new country
+            threading.Thread(target=fetch_news_bg,   daemon=True).start()
+            threading.Thread(target=lambda: fetch_stocks_bg(load_stock_watchlist()), daemon=True).start()
+            NSS.msg = f"Country set to {COUNTRY_DB[code]['name']}"; NSS.msg_time = time.time()
+        return
+
+    # ── Country overlay open ──────────────────────────────────────────────────
+    if NSS.country_mode:
+        if k in (ord('j'), curses.KEY_DOWN):
+            NSS.country_cur = min(n_countries - 1, NSS.country_cur + 1)
+        elif k in (ord('k'), curses.KEY_UP):
+            NSS.country_cur = max(0, NSS.country_cur - 1)
+        elif k in (10, 13):
+            code = COUNTRY_LIST[NSS.country_cur]
+            old  = get_user_country()
+            set_user_country(code)
+            NSS.country_mode = False
+            if code != old:
+                # Wipe cached news so new country feeds load fresh
+                with _NEWS_LOCK:
+                    global _news_items
+                    _news_items = []
+                threading.Thread(target=fetch_news_bg,   daemon=True).start()
+                threading.Thread(target=lambda: fetch_stocks_bg(load_stock_watchlist()), daemon=True).start()
+            NSS.msg = f"Switched to {COUNTRY_DB[code]['name']}"; NSS.msg_time = time.time()
+        elif k == 27:  # ESC
+            NSS.country_mode = False
+        return
+
+    # ── Normal tab navigation ─────────────────────────────────────────────────
+    if k == ord('1'):
+        NSS.tab = 0; return
+    if k == ord('2'):
+        NSS.tab = 1; return
+    if k == ord('C'):
+        NSS.country_mode = True
+        # pre-position cursor on current country
+        code = get_user_country()
+        try: NSS.country_cur = COUNTRY_LIST.index(code)
+        except ValueError: NSS.country_cur = 0
+        return
+    if k == ord('r'):
+        if NSS.tab == 0:
+            threading.Thread(target=fetch_news_bg, daemon=True).start()
+        else:
+            threading.Thread(target=lambda: fetch_stocks_bg(load_stock_watchlist()), daemon=True).start()
+        return
+
+    if NSS.tab == 0:  # ── news tab ──────────────────────────────────────────
+        if k in (ord('j'), curses.KEY_DOWN):
+            NSS.scroll += 3
+        elif k in (ord('k'), curses.KEY_UP):
+            NSS.scroll = max(0, NSS.scroll - 3)
+
+    elif NSS.tab == 1:  # ── stocks tab ────────────────────────────────────────
+        if NSS.stock_input:
+            if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
+                NSS.stock_buf = NSS.stock_buf[:-1]
+            elif k == 27:
+                NSS.stock_input = False
+                NSS.stock_buf   = ""
+            elif k in (10, 13):
+                sym = NSS.stock_buf.upper().strip()
+                NSS.stock_input = False
+                NSS.stock_buf   = ""
+                if sym:
+                    wl = load_stock_watchlist()
+                    if sym not in [s.upper() for s in wl]:
+                        wl.append(sym)
+                        save_stock_watchlist(wl)
+                        threading.Thread(target=lambda s=sym: fetch_stocks_bg([s]),
+                                         daemon=True).start()
+                        NSS.msg      = f"Added {sym} — fetching price…"
+                        NSS.msg_time = time.time()
+                    else:
+                        NSS.msg      = f"{sym} is already in your watchlist"
+                        NSS.msg_time = time.time()
+            elif 32 <= k <= 126:
+                if len(NSS.stock_buf) < 10:
+                    NSS.stock_buf += chr(k)
+        else:
+            wl = load_stock_watchlist()
+            n  = len(wl)
+            if k in (ord('j'), curses.KEY_DOWN):
+                NSS.stock_cur = min(max(0, n - 1), NSS.stock_cur + 1)
+            elif k in (ord('k'), curses.KEY_UP):
+                NSS.stock_cur = max(0, NSS.stock_cur - 1)
+            elif k == ord('a'):
+                NSS.stock_input = True
+                NSS.stock_buf   = ""
+            elif k == ord('d') and wl:
+                idx = max(0, min(NSS.stock_cur, n - 1))
+                removed = wl.pop(idx)
+                save_stock_watchlist(wl)
+                NSS.stock_cur = max(0, min(idx, len(wl) - 1))
+                NSS.msg       = f"Removed {removed}"
+                NSS.msg_time  = time.time()
+            elif k == ord('D'):
+                # Reset to country defaults
+                code    = get_user_country() or "GLOBAL"
+                info    = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+                defaults = info["stocks"][:]
+                save_stock_watchlist(defaults)
+                NSS.stock_cur = 0
+                threading.Thread(target=lambda: fetch_stocks_bg(defaults), daemon=True).start()
+                NSS.msg      = f"Reset to {info['name']} defaults"
+                NSS.msg_time = time.time()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DASHBOARD — inject news/stocks widget
+# ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 VIEW_FNS = [v_dashboard, v_clock, v_focus, v_neofetch, v_network,
-            v_library, v_calendar, v_video]
+            v_library, v_calendar, v_video, v_news_stocks]
 
 def _in_text_input_mode():
     v = ST.view
@@ -3273,6 +4714,9 @@ def _in_text_input_mode():
     if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode):  return True
     if v == 5 and LS.mode in ("add_url", "add_file"):            return True
     if v == 7 and VS.mode in ("add_url", "add_file"):            return True
+    if v == 8 and NSS.stock_input:                               return True
+    if v == 8 and NSS.country_mode:                              return True
+    if v == 8 and not get_user_country():                        return True  # first-run picker
     return False
 
 
