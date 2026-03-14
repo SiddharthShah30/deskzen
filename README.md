@@ -1,246 +1,87 @@
-# 🖥️ Terminal StandBy
-
-> An Apple-style standby mode for your terminal — ambient music, live spectrum visualizer, system stats, focus tools, real device monitoring, a full calendar, and video playback. All in one beautiful TUI.
-
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)
-![Version](https://img.shields.io/badge/Version-v3-blueviolet)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
-![License](https://img.shields.io/badge/License-MIT-green)
-
----
-
 ## ✨ Features
 
-### 🎵 Audio Engine
-- **5 built-in ambient tracks** — synthesized in real-time, zero downloads needed:
-  - 🟤 **Brown Noise** — deep bass rumble for deep work & coding
-  - 🌸 **Pink Noise** — balanced 1/f hiss for reading & focus
-  - ⬜ **White Noise** — flat static for blocking distractions
-  - 🌧️ **Rain on Glass** — soft rain texture with droplet pops
-  - 🌌 **Deep Space Hum** — low-frequency drone for meditation
-- **Custom track support** — add local audio files or YouTube URLs via `yt-dlp`
-- **Shuffle, Repeat, Prev/Next** controls available from every view
-- **Smart backend detection** — prefers `sounddevice` (gapless, zero subprocess) with auto-install on first run, falls back to `ffplay`, `afplay`, `mpv`, `aplay`, or `winsound`
+### 🎵 Procedural Audio Engine
 
-### 📊 Views (navigate with `←` / `→`)
+* **Built-in Synthesis**: Includes 5 real-time synthesized tracks (Brown, Pink, and White noise, Rain on Glass, and Deep Space Hum) designed for deep work.
+* **Custom Library**: Supports local file playback (MP3, FLAC, WAV) and YouTube audio streaming via `yt-dlp`.
+* **Adaptive Visualizer**: A live spectrum visualizer reacts to the frequency profile of the current audio.
+
+### 🗓️ Productivity & System Views
+
+* **Dashboard (View 1)**: A central hub displaying your clock, system status, and a persistent todo list.
+* **News & Stocks (View 9)**: New in v3, this view provides real-time RSS news and stock market tracking.
+* **Focus Tool**: A Pomodoro timer with customizable modes like **Coding**, **Reading**, and **Deep Work**.
+* **Calendar**: Day, Week, and Month views with support for Google and Apple Calendar (ICS) sync.
+
+### 📡 Real-Time Monitoring & Media
+
+* **Device Tracking**: Scans and displays actually connected Bluetooth and USB hardware, including battery percentages for supported peripherals.
+* **Video Playback**: Stream YouTube videos or play local files directly via `mpv` or `ffplay`.
+* **Neofetch**: An animated Pac-Man logo paired with detailed system specs, including GPU and kernel info.
+
+---
+
+## 📊 Views (Navigate with `←` / `→`)
 
 | # | View | Description |
-|---|------|-------------|
-| 1 | **Dashboard** | System overview, todos, pomodoro timer, spectrum visualizer |
-| 2 | **Clock + Music** | Full-screen clock, now-playing panel, spectrum visualizer |
-| 3 | **Focus** | Pomodoro timer with work/break phases and focus modes |
-| 4 | **Neofetch** | Animated Pac-Man logo, system info panel — OS, CPU, GPU, RAM, uptime, and more |
-| 5 | **Network** | Live bandwidth stats, real connected device list with battery % |
-| 6 | **Library** | Browse, add, and manage your music library |
-| 7 | **Calendar** | Day, Week, and Month views with Google & Apple Calendar sync |
-| 8 | **Video** | Play local video files or stream YouTube via mpv/ffplay |
-
-### 🗓️ Calendar View
-A full calendar built into the terminal:
-- **Three view modes** — Day, Week, and Month, toggled with `1` / `2` / `3`
-- **Google Calendar sync** — paste your secret ICS URL and hit `G` to sync
-- **Apple Calendar sync** — export your `.ics` file to `~/.terminal_standby.ics`
-- **Add events manually** — step-through form for date, time, and title
-- **Delete events** — remove local events with a confirmation prompt
-- **Today indicator** — current hour highlighted with a live `▶` marker in Day view
-- Events are colour-coded: upcoming in cyan, selected in amber, past events dimmed
-
-### 🎬 Video View
-Play video directly from Terminal StandBy:
-- **Local file playback** — open any video file by path (`O`)
-- **YouTube streaming** — stream YouTube videos via `yt-dlp` without downloading (`Y`)
-- **Auto-installs mpv** — detects and installs mpv automatically; falls back to `ffplay`
-- Video plays in a separate window launched by the renderer
-
-### 📡 Real Device Monitoring
-The Network view scans and displays **actually connected** devices — not built-in or virtual ones:
-- **Bluetooth** — AirPods, keyboards, mice, phones (with battery % via GATT where available)
-- **USB** — external drives, hubs, USB-C docks (labelled `[USB]` / `[USB-C]`)
-- **Controllers** — Xbox, PlayStation, and generic gamepads (`[CTRL]`)
-- **Phones** — Android (ADB) and iPhone detected as `[PHONE]`
-- **Audio / HID** — external audio interfaces, cameras, and peripherals
-- Battery percentages shown inline in the Battery & Power panel for all BT devices that expose them
-
-### 🌈 Other Highlights
-- Live **CAVA-style spectrum visualizer** reacts to the current ambient genre
-- Animated **Pac-Man logo** in the Neofetch view
-- **Pomodoro timer** with Work / Break phases (25 min / 5 min)
-- Persistent **todo list** saved between sessions
-- Full **256-color** terminal UI with clean box-drawing characters
-- Minimum terminal size guard (72×24) with a graceful warning
-- Cross-platform: Windows, macOS, Linux
-
----
-
-## 📋 Requirements
-
-- **Python 3.8+**
-- Audio backend — the app will auto-install `sounddevice` on first run. Alternatively, install any of:
-  - `ffplay` (part of [FFmpeg](https://ffmpeg.org/) — best for file playback)
-  - `afplay` (macOS built-in)
-  - `mpv` or `mplayer`
-  - `aplay` (Linux/ALSA)
-  - `winsound` / `powershell` (Windows fallback)
-
-### Optional but recommended
-```
-pip install psutil        # real CPU, RAM, battery, and network stats
-pip install sounddevice   # best audio backend — gapless, auto-installed on first run
-pip install yt-dlp        # add YouTube tracks to your library, or stream YouTube video
-pip install windows-curses  # Windows only — auto-installed on first run
-```
-
----
-
-## 🚀 Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/your-username/terminal-standby.git
-cd terminal-standby
-
-# Install optional dependencies
-pip install psutil yt-dlp
-
-# Run it!
-python main.py
-```
-
-> **Windows users:** `windows-curses` will be installed automatically on first launch if it's missing. `sounddevice` is also auto-installed in the background on first run for the best audio experience.
-
----
-
-## 🗓️ Setting Up Calendar Sync
-
-### Google Calendar
-1. Open Google Calendar → **Settings** → select your calendar
-2. Scroll to **Secret address in iCal format** and copy the URL
-3. In Terminal StandBy, navigate to the **Calendar** view
-4. Press `G` and paste the URL, then press `Enter` to sync
-
-### Apple Calendar
-1. Open Apple Calendar → **File → Export…**
-2. Save the `.ics` file to `~/.terminal_standby.ics`
-3. Navigate to the **Calendar** view and press `G` to load it
-
-Events sync on demand — press `G` at any time to refresh.
+| --- | --- | --- |
+| 1 | **Dashboard** | Your central command. Manage your current projects, like finalizing **Triket** logic or updating your **portfolio build**. |
+| 2 | **Clock + Music** | Immersive clock and now-playing panel with a large visualizer. |
+| 3 | **Focus** | Pomodoro timer with work/break phases. |
+| 4 | **Neofetch** | Animated TUI system information panel. |
+| 5 | **Network** | Bandwidth monitoring and real device discovery. |
+| 6 | **Library** | Management for built-in, local, and YouTube-sourced audio. |
+| 7 | **Calendar** | Full-screen interactive calendar with event management. |
+| 8 | **Video** | Separate-window video player for local or streamed content. |
+| 9 | **News & Stocks** | Localized news and market data based on your region. |
 
 ---
 
 ## 🎮 Controls
 
-### Global (works in every view)
-| Key | Action |
-|-----|--------|
-| `←` / `h` | Previous view |
-| `→` / `l` / `Tab` | Next view |
-| `Space` | Play / Pause music |
-| `z` | Previous track |
-| `x` | Next track |
-| `s` | Toggle shuffle |
-| `R` | Toggle repeat |
-| `q` | Quit |
+### Global Keys
 
-### Dashboard View
-| Key | Action |
-|-----|--------|
-| `↑` / `k` | Move todo cursor up |
-| `↓` / `j` | Move todo cursor down |
-| `a` | Add new todo item |
-| `d` | Delete selected todo |
-| `Enter` | Toggle todo complete |
-| `Space` | Play / Pause music |
-| `p` | Start / pause pomodoro |
-| `r` | Reset pomodoro |
+* `Space`: Play / Pause music.
+* `←` / `→`: Switch between views.
+* `z` / `x`: Previous / Next track.
+* `q`: Quit application (automatically saves your todos and library).
 
-### Focus View
-| Key | Action |
-|-----|--------|
-| `p` | Start / pause timer |
-| `r` | Reset timer |
-| `s` | Switch Work ↔ Break |
-| `f` | Cycle focus mode |
+### News & Stocks (View 9)
 
-### Calendar View
-| Key | Action |
-|-----|--------|
-| `1` / `2` / `3` | Switch Day / Week / Month view |
-| `j` / `k` | Navigate events (Day) or weeks/months |
-| `a` | Add a new event |
-| `d` | Delete selected event |
-| `G` | Sync from Google / Apple Calendar (ICS) |
-| `r` | Refresh calendar |
-| `t` | Jump to today |
+* `1` / `2`: Toggle between News and Stocks tabs.
+* `C`: Change your country/region (updates both RSS feeds and stock tickers).
+* `a` / `d`: Add or remove tickers from your stock watchlist.
+* `r`: Force a manual refresh of news and market data.
 
-### Library View
-| Key | Action |
-|-----|--------|
-| `↑` / `k` & `↓` / `j` | Navigate tracks |
-| `Enter` | Play selected track |
-| `Y` | Add YouTube URL |
-| `F` | Add local file path |
-| `D` | Delete selected track |
+### Calendar (View 7)
 
-### Video View
-| Key | Action |
-|-----|--------|
-| `Y` | Play a YouTube URL |
-| `O` | Open a local video file |
-| `S` | Stop playback |
+* `1` / `2` / `3` / `4`: Switch view modes (Day, Week, Month, Year).
+* `a` / `d`: Add a new local event or delete the selected one.
+* `G`: Sync from an external ICS URL (Google/Apple).
 
 ---
 
-## 📁 File Structure
+## 🚀 Installation & Setup
+
+1. **Clone and Run**:
+```bash
+git clone https://github.com/your-username/terminal-standby.git
+cd terminal-standby
+python main.py
 
 ```
-terminal-standby/
-├── main.py                            # Main application (single-file)
-├── ~/.terminal_standby_music.json     # Saved music library (auto-created)
-├── ~/.terminal_standby_cache/         # Downloaded YouTube audio cache
-├── ~/.terminal_standby.ics            # Apple/Google Calendar ICS file
-├── ~/.terminal_standby_cal.json       # Manually added local calendar events
-└── ~/.terminal_standby_todos.json     # Persistent todo list
-```
+
+
+2. **Dependencies**: The app will attempt to auto-install `windows-curses` and `sounddevice` on first run. For the full experience, install `psutil` and `yt-dlp` via pip.
+3. **Localization**: On first launch of View 9, you will be prompted to select your country. This sets up defaults for news sources and market data.
 
 ---
 
-## 🔧 Audio Backend Priority
+## 📁 Persistence
 
-Terminal StandBy auto-detects and uses the best available backend:
+The application stores your data in your home directory:
 
-1. `sounddevice` ← gapless PCM streaming via PortAudio, auto-installs
-2. `ffplay` ← best for file playback (all platforms)
-3. `afplay` ← macOS native
-4. `mpv` / `mplayer` ← cross-platform
-5. `aplay` ← Linux/ALSA
-6. `winsound` / `powershell` ← Windows fallback
-
-Install [FFmpeg](https://ffmpeg.org/download.html) alongside `sounddevice` for the best experience across both noise streaming and local file playback.
-
----
-
-## 🚧 Roadmap
-
-### Coming Soon
-- [ ] **Spotify integration** — connect your Spotify account and control playback from the terminal
-- [ ] **In-terminal ASCII video rendering** — render video frames directly inside the TUI (currently plays in a separate window)
-
-### Known Issues
-- [ ] Brown Noise and Pink Noise volume levels can be uncomfortably loud — softening pass in progress
-- [ ] Bluetooth battery % not always retrievable depending on OS/driver support
-
----
-
-## 🤝 Contributing
-
-Pull requests are welcome! If you're fixing a bug or adding a feature, please open an issue first to discuss what you'd like to change.
-
----
-
-## 📜 License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-<p align="center">Made with ☕ and 🎧 for terminal lovers everywhere</p>
+* `~/.terminal_standby_todos.json`: Your task list, including your current development goals.
+* `~/.terminal_standby_settings.json`: Your region and UI preferences.
+* `~/.terminal_standby_watchlist.json`: Your custom stock tickers.
+* `~/.terminal_standby_cal.json`: Manually added calendar events.
