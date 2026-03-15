@@ -2313,7 +2313,7 @@ def draw_spectrum(win, y, x, h, w, spectrum, col_low=P_CYAN, col_mid=P_BLUE, col
 # ══════════════════════════════════════════════════════════════════════════════
 #  APP STATE
 # ══════════════════════════════════════════════════════════════════════════════
-VIEWS = ["DASHBOARD","CLOCK + MUSIC","FOCUS","NEOFETCH","NETWORK","LIBRARY","CALENDAR","VIDEO","NEWS & STOCKS"]
+VIEWS = ["DASHBOARD","CLOCK + MUSIC","FOCUS","NEOFETCH","NETWORK","LIBRARY","CALENDAR","VIDEO","NEWS & STOCKS","ETF · CRYPTO"]
 
 class State:
     def __init__(self):
@@ -3680,7 +3680,98 @@ def v_video(win, W, H):
 # ══════════════════════════════════════════════════════════════════════════════
 #  INPUT HANDLER
 # ══════════════════════════════════════════════════════════════════════════════
+def _handle_mouse():
+    """Translate a curses mouse event into app actions."""
+    try:
+        _, mx, my, _, bstate = curses.getmouse()
+    except curses.error:
+        return
+
+    v = ST.view
+
+    # ── Scroll wheel (Button4 = up, Button5 = down) ───────────────────
+    if bstate & curses.BUTTON4_PRESSED:
+        if v == 8:
+            if NSS.tab == 0:
+                NSS.scroll = max(0, NSS.scroll - 3)
+            elif NSS.tab == 1 and NSS.stock_screen == 0:
+                NSS.market_cur = max(0, NSS.market_cur - 1)
+            elif NSS.tab == 1 and NSS.stock_screen == 1:
+                NSS.stock_cur  = max(0, NSS.stock_cur - 1)
+        elif v == 9:
+            ECS.cursor = max(0, ECS.cursor - 1)
+        return
+    if bstate & curses.BUTTON5_PRESSED:
+        if v == 8:
+            if NSS.tab == 0:
+                NSS.scroll += 3
+            elif NSS.tab == 1 and NSS.stock_screen == 0:
+                NSS.market_cur += 1
+            elif NSS.tab == 1 and NSS.stock_screen == 1:
+                NSS.stock_cur  += 1
+        elif v == 9:
+            ECS.cursor += 1
+        return
+
+    # ── Only handle left-button click/press from here ─────────────────
+    if not (bstate & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED |
+                      curses.BUTTON1_RELEASED)):
+        return
+
+    # ── Tab bar row (row 1) ───────────────────────────────────────────
+    if my == 1:
+        if v == 9:   # ETF/Crypto sub-tabs
+            for x0, x1, sidx in ECS.sub_regions:
+                if x0 <= mx < x1:
+                    ECS.screen = sidx; ECS.cursor = 0; return
+        else:        # News/Stocks main tabs
+            for x0, x1, tidx in NSS.tab_regions:
+                if x0 <= mx < x1:
+                    NSS.tab = tidx; NSS.news_cursor = -1; return
+
+    # ── Only News & Stocks view handles further click logic ──────────
+    if v != 8:
+        return
+
+    # ── News tab: click a headline row ───────────────────────────────
+    if NSS.tab == 0:
+        item_idx = NSS.news_row_map.get(my, -1)
+        if item_idx < 0:
+            return
+        items = get_news_items()
+        if item_idx >= len(items):
+            return
+        url = items[item_idx].get("url", "")
+        if NSS.news_cursor == item_idx:
+            # already selected → open URL
+            if url:
+                _open_url(url)
+        else:
+            # first click → highlight
+            NSS.news_cursor = item_idx
+
+    # ── Stocks tab: click a ticker row ───────────────────────────────
+    elif NSS.tab == 1:
+        # Sub-tab bar click (row 3: MARKET / PORTFOLIO)
+        if my == 3:
+            for x0, x1, sidx in NSS.stock_sub_regions:
+                if x0 <= mx < x1:
+                    NSS.stock_screen = sidx
+                    return
+        # Portfolio row click
+        if NSS.stock_screen == 1:
+            wl = load_stock_watchlist()
+            for base in (9, 7):
+                rel = my - base
+                if 0 <= rel < len(wl):
+                    NSS.stock_cur = rel
+                    return
+
+
 def handle_key(k):
+    if k == curses.KEY_MOUSE:
+        _handle_mouse()
+        return
     v = ST.view
 
     if ST.todo_add:
@@ -3858,6 +3949,8 @@ def handle_key(k):
 
     elif v == 8:
         _handle_news_stocks_key(k)
+    elif v == 9:
+        _handle_etf_crypto_key(k)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3865,6 +3958,56 @@ def handle_key(k):
 # ══════════════════════════════════════════════════════════════════════════════
 import urllib.request as _ureq
 import html as _html
+
+
+def _open_url(url):
+    """Open URL in the default browser. Non-blocking — runs in a daemon thread.
+    Also writes the URL to ~/.ts_last_url.txt as a fallback the user can copy.
+    """
+    if not url:
+        return
+    # Always write to file so user can find it even if browser fails
+    try:
+        with open(os.path.expanduser("~/.ts_last_url.txt"), "w") as _f:
+            _f.write(url + "\n")
+    except Exception:
+        pass
+    def _do_open():
+        opened = False
+        # Try platform-native opener first (never blocks curses)
+        try:
+            sys_name = platform.system()
+            if sys_name == "Darwin":
+                r = subprocess.run(["open", url],
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=5)
+                opened = (r.returncode == 0)
+            elif sys_name == "Windows":
+                os.startfile(url)
+                opened = True
+            else:
+                # Try xdg-open, then sensible-browser, then x-www-browser
+                for cmd in ("xdg-open", "sensible-browser", "x-www-browser"):
+                    if shutil.which(cmd):
+                        r = subprocess.run([cmd, url],
+                                           stdout=subprocess.DEVNULL,
+                                           stderr=subprocess.DEVNULL, timeout=5)
+                        opened = (r.returncode == 0)
+                        if opened:
+                            break
+        except Exception:
+            pass
+        if not opened:
+            # Last resort: Python webbrowser module
+            try:
+                import webbrowser
+                webbrowser.open_new_tab(url)
+            except Exception:
+                pass
+    threading.Thread(target=_do_open, daemon=True).start()
+    # Show confirmation in NSS message bar
+    NSS.msg = f"Opening: {url[:60]}"
+    NSS.msg_time = time.time()
 
 NEWS_FILE      = os.path.join(os.path.expanduser("~"), ".terminal_standby_news.json")
 STOCKS_FILE    = os.path.join(os.path.expanduser("~"), ".terminal_standby_stocks.json")
@@ -3880,6 +4023,12 @@ _stocks_status = "Loading stocks…"
 _news_last     = 0.0
 _stocks_last   = 0.0
 
+# ── Currency rate cache ────────────────────────────────────────────────────────
+_currency_rates  = {}   # "FROM/TO" -> float rate
+_currency_lock   = threading.Lock()
+_currency_last   = 0.0
+CURRENCY_REFRESH = 1800  # 30 min
+
 NEWS_REFRESH_SECS   = 3600   # 1 hour
 STOCKS_REFRESH_SECS = 300    # 5 minutes
 
@@ -3890,8 +4039,8 @@ COUNTRY_DB = {
         "flag": "🇺🇸", "name": "United States",
         "feeds": [
             ("Reuters",    "https://feeds.reuters.com/reuters/topNews"),
-            ("AP News",    "https://rsshub.app/apnews/topics/apf-topnews"),
-            ("CNN",        "http://rss.cnn.com/rss/cnn_topstories.rss"),
+            ("AP News",    "https://feeds.apnews.com/rss/apf-topnews"),
+            ("CNN",        "https://rss.cnn.com/rss/cnn_topstories.rss"),
             ("NPR",        "https://feeds.npr.org/1001/rss.xml"),
         ],
         "stocks": ["AAPL", "MSFT", "GOOGL", "TSLA", "AMZN", "NVDA", "META"],
@@ -3911,9 +4060,10 @@ COUNTRY_DB = {
         "flag": "🇮🇳", "name": "India",
         "feeds": [
             ("Times of India", "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"),
-            ("NDTV",           "https://feeds.feedburner.com/ndtvnews-top-stories"),
-            ("Hindu",          "https://www.thehindu.com/news/national/feeder/default.rss"),
-            ("Hindustan Times","https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml"),
+            ("Hindu",          "https://www.thehindu.com/news/feeder/default.rss"),
+            ("NDTV",           "https://feeds.feedburner.com/NDTV-TopStories"),
+            ("India Today",    "https://www.indiatoday.in/rss/1206578"),
+            ("Economic Times", "https://economictimes.indiatimes.com/rssfeedsdefault.cms"),
         ],
         "stocks": ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "WIPRO.NS", "ICICIBANK.NS"],
         "currency": "INR",
@@ -4021,7 +4171,7 @@ COUNTRY_DB = {
     "KR": {
         "flag": "🇰🇷", "name": "South Korea",
         "feeds": [
-            ("Korea Herald","http://www.koreaherald.com/rss"),
+            ("Korea Herald","https://www.koreaherald.com/rss/"),
             ("Yonhap",      "https://en.yna.co.kr/RSS/news.xml"),
             ("Reuters",     "https://feeds.reuters.com/reuters/topNews"),
         ],
@@ -4032,7 +4182,7 @@ COUNTRY_DB = {
         "flag": "🇨🇳", "name": "China",
         "feeds": [
             ("CGTN",      "https://www.cgtn.com/subscribe/rss/section/news.xml"),
-            ("Xinhua",    "http://www.xinhuanet.com/english/rss/worldrss.xml"),
+            ("Xinhua",    "https://english.news.cn/rss/world.xml"),
             ("Reuters",   "https://feeds.reuters.com/reuters/topNews"),
         ],
         "stocks": ["BABA", "JD", "PDD", "BIDU", "NIO", "XPEV"],
@@ -4054,7 +4204,7 @@ COUNTRY_DB = {
             ("Reuters",    "https://feeds.reuters.com/reuters/topNews"),
             ("BBC News",   "https://feeds.bbci.co.uk/news/rss.xml"),
             ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
-            ("AP News",    "https://rsshub.app/apnews/topics/apf-topnews"),
+            ("AP News",    "https://feeds.apnews.com/rss/apf-topnews"),
         ],
         "stocks": ["AAPL", "MSFT", "GOOGL", "TSLA", "AMZN", "NVDA"],
         "currency": "USD",
@@ -4089,6 +4239,16 @@ def get_user_country():
 def set_user_country(code):
     s = load_user_settings()
     s["country"] = code
+    # On first-run only: save home_currency from selected country as baseline.
+    # This is overwritten once IP geolocation succeeds, but ensures the banner
+    # works even if geolocation is unavailable.
+    # IMPORTANT: we only write home_currency if NOT already set — changing the
+    # viewed country later must NOT overwrite the user's real home currency.
+    if not s.get("home_currency"):
+        info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+        s["home_currency"] = info.get("currency", "USD")
+        global _home_currency_cache
+        _home_currency_cache = s["home_currency"]
     save_user_settings(s)
     # Re-seed watchlist with country defaults if watchlist was never customised
     wl_path = os.path.join(os.path.expanduser("~"), ".terminal_standby_watchlist.json")
@@ -4108,39 +4268,181 @@ def _strip_tags(s):
     return re.sub(r'<[^>]+>', '', s).strip()
 
 
-def _fetch_rss(url, source, limit=5):
-    """Fetch one RSS feed, return list of article dicts."""
-    try:
-        req = _ureq.Request(url, headers={"User-Agent": "TerminalStandBy/3"})
-        with _ureq.urlopen(req, timeout=10) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-        items = []
-        import re
-        # Extract <item> blocks
-        for block in re.findall(r'<item>(.*?)</item>', raw, re.DOTALL)[:limit]:
-            title_m = re.search(r'<title[^>]*>(.*?)</title>', block, re.DOTALL)
-            date_m  = re.search(r'<pubDate>(.*?)</pubDate>', block, re.DOTALL)
-            title   = _html.unescape(_strip_tags(title_m.group(1))) if title_m else ""
-            pub     = date_m.group(1).strip()[:22] if date_m else ""
-            # Shorten pubDate to just time or "today"
+def _fetch_rss(url, source, limit=7):
+    """Fetch one RSS/Atom feed, return list of article dicts.
+    Handles both <item> (RSS) and <entry> (Atom) formats."""
+    import re
+    USER_AGENTS = [
+        "Mozilla/5.0 (compatible; TerminalStandBy/3; +https://github.com)",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Feedfetcher-Google; (+http://www.google.com/feedfetcher.html)",
+    ]
+    raw = None
+    for ua in USER_AGENTS:
+        try:
+            req = _ureq.Request(url, headers={"User-Agent": ua,
+                                               "Accept": "application/rss+xml, application/xml, text/xml, */*"})
+            with _ureq.urlopen(req, timeout=12) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            break
+        except Exception:
+            continue
+    if not raw:
+        return []
+
+    items = []
+
+    # Try RSS <item> blocks first
+    blocks = re.findall(r'<item[^>]*>(.*?)</item>', raw, re.DOTALL)
+
+    # Fall back to Atom <entry> blocks
+    if not blocks:
+        blocks = re.findall(r'<entry[^>]*>(.*?)</entry>', raw, re.DOTALL)
+
+    for block in blocks[:limit]:
+        # title — strip CDATA and tags
+        title_m = re.search(r'<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>', block, re.DOTALL)
+        # pubDate (RSS) or published/updated (Atom)
+        date_m  = (re.search(r'<pubDate[^>]*>(.*?)</pubDate>', block, re.DOTALL) or
+                   re.search(r'<published[^>]*>(.*?)</published>', block, re.DOTALL) or
+                   re.search(r'<updated[^>]*>(.*?)</updated>', block, re.DOTALL))
+
+        title = _html.unescape(_strip_tags(title_m.group(1))) if title_m else ""
+        pub   = date_m.group(1).strip()[:40] if date_m else ""
+
+        # Parse relative time
+        ts = ""
+        for parser in (
+            lambda p: __import__('email.utils', fromlist=['parsedate_to_datetime'])
+                      .parsedate_to_datetime(p),
+            lambda p: datetime.datetime.fromisoformat(p.replace("Z", "+00:00")),
+        ):
             try:
-                from email.utils import parsedate_to_datetime as _pdt
-                dt = _pdt(pub)
-                now = datetime.datetime.now(datetime.timezone.utc)
+                dt   = parser(pub)
+                # normalise to UTC-aware
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                now  = datetime.datetime.now(datetime.timezone.utc)
                 diff = now - dt
-                if diff.total_seconds() < 3600:
-                    ts = f"{int(diff.total_seconds()//60)}m ago"
-                elif diff.total_seconds() < 86400:
-                    ts = f"{int(diff.total_seconds()//3600)}h ago"
+                secs = diff.total_seconds()
+                if secs < 3600:
+                    ts = f"{int(secs // 60)}m ago"
+                elif secs < 86400:
+                    ts = f"{int(secs // 3600)}h ago"
                 else:
                     ts = dt.strftime("%b %d")
+                break
             except Exception:
-                ts = pub[:12]
-            if title and len(title) > 4:
-                items.append({"title": title, "source": source, "time": ts})
-        return items
-    except Exception as e:
-        return []
+                continue
+        if not ts:
+            ts = pub[:12]
+
+        # Extract article URL — prefer <guid> (canonical) over <link> (may be feed redirect)
+        url = ""
+        _lm_guid = re.search(r'<guid[^>]*>(https?://[^\s<]+)</guid>', block, re.DOTALL)
+        _lm_link = re.search(r'<link[^>]*>\s*(https?://[^\s<]+)', block, re.DOTALL)
+        _lm_href = re.search(r'<link[^>]+href=["\']([^"\'>\s]+)["\']', block, re.DOTALL)
+        for _lm in (_lm_guid, _lm_link, _lm_href):
+            if _lm:
+                _u = _lm.group(1).strip()
+                # skip feed-redirect URLs (contain /~r/ or feedburner etc.)
+                if _u and '/~r/' not in _u and 'feedburner' not in _u and 'feedproxy' not in _u:
+                    url = _u
+                    break
+        if not url and _lm_guid:  # fallback: use guid even if it looks like a feed url
+            url = _lm_guid.group(1).strip()
+
+        title = title.strip()
+        if title and len(title) > 4:
+            items.append({"title": title, "source": source, "time": ts, "url": url})
+
+    return items
+
+
+def _fetch_currency_rate(from_cur, to_cur):
+    """Fetch exchange rate from_cur -> to_cur via Yahoo Finance.
+    Returns float rate or None on failure."""
+    if from_cur == to_cur:
+        return 1.0
+    try:
+        symbol = f"{from_cur}{to_cur}=X"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
+        req = _ureq.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+        with _ureq.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+        meta  = data["chart"]["result"][0]["meta"]
+        rate  = float(meta.get("regularMarketPrice") or meta.get("previousClose") or 0)
+        return rate if rate > 0 else None
+    except Exception:
+        return None
+
+
+def fetch_currency_bg(from_cur, to_cur):
+    """Background: fetch and cache currency rate."""
+    global _currency_rates, _currency_last
+    key  = f"{from_cur}/{to_cur}"
+    rate = _fetch_currency_rate(from_cur, to_cur)
+    if rate:
+        with _currency_lock:
+            _currency_rates[key] = rate
+        _currency_last = time.time()
+
+
+def get_currency_rate(from_cur, to_cur):
+    """Return cached rate or None."""
+    if from_cur == to_cur:
+        return 1.0
+    key = f"{from_cur}/{to_cur}"
+    with _currency_lock:
+        return _currency_rates.get(key)
+
+
+_home_currency_cache = ""  # in-memory cache, populated once per session
+
+def get_home_currency():
+    """Return the user's physical home currency.
+
+    Priority order:
+    1. 'home_currency' in settings file (set at first-run, never overwritten)
+    2. IP geolocation via ipapi.co (tried once, result cached to settings)
+    3. USD as safe fallback
+
+    This is intentionally SEPARATE from the viewed/selected country currency.
+    If a user in India selects 'US' to watch US news/stocks, home_cur=INR
+    and view_cur=USD, so we show 1 USD = 86.xx INR.
+    """
+    global _home_currency_cache
+    if _home_currency_cache:
+        return _home_currency_cache
+
+    settings = load_user_settings()
+
+    # 1. Already stored in settings
+    stored = settings.get("home_currency", "")
+    if stored and len(stored) == 3:
+        _home_currency_cache = stored.upper()
+        return _home_currency_cache
+
+    # 2. Try IP geolocation
+    try:
+        req = _ureq.Request(
+            "https://ipapi.co/json/",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; TerminalStandBy/3)"},
+        )
+        with _ureq.urlopen(req, timeout=6) as resp:
+            geo = json.loads(resp.read().decode())
+        currency = geo.get("currency", "")
+        if currency and len(currency) == 3:
+            _home_currency_cache = currency.upper()
+            settings["home_currency"] = _home_currency_cache
+            save_user_settings(settings)
+            return _home_currency_cache
+    except Exception:
+        pass
+
+    # 3. Hard fallback — do NOT use selected country here
+    #    Leave home_currency unset so next session tries geolocation again
+    return "USD"
 
 
 def fetch_news_bg():
@@ -4227,6 +4529,137 @@ def fetch_stocks_bg(symbols):
     _stocks_last = time.time()
 
 
+# ── Per-country market symbols for the MARKET trending screen ─────────────
+MARKET_SYMBOLS = {
+    "US":     ["AAPL","MSFT","NVDA","GOOGL","AMZN","TSLA","META","BRK-B","JPM","V","NFLX","AMD"],
+    "IN":     ["RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","WIPRO.NS","BAJFINANCE.NS",
+               "ICICIBANK.NS","HINDUNILVR.NS","SBIN.NS","ADANIENT.NS","LT.NS","MARUTI.NS"],
+    "GB":     ["BARC.L","HSBA.L","BP.L","VOD.L","GSK.L","AZN.L","SHEL.L","LLOY.L","RIO.L","BT-A.L"],
+    "DE":     ["SAP.DE","BMW.DE","SIE.DE","ALV.DE","DTE.DE","VOW3.DE","BAS.DE","MRK.DE","BAYN.DE"],
+    "FR":     ["MC.PA","OR.PA","TTE.PA","SAN.PA","AIR.PA","BNP.PA","SU.PA","DG.PA","CAP.PA"],
+    "JP":     ["7203.T","9984.T","6758.T","8306.T","6861.T","9432.T","4063.T","6367.T","7974.T"],
+    "AU":     ["CBA.AX","BHP.AX","ANZ.AX","WBC.AX","CSL.AX","NAB.AX","WDS.AX","MQG.AX","RIO.AX"],
+    "CA":     ["SHOP.TO","RY.TO","TD.TO","BNS.TO","ENB.TO","CNR.TO","BMO.TO","MFC.TO","CP.TO"],
+    "CN":     ["BABA","JD","PDD","BIDU","NIO","XPEV","TCEHY","NTES","LI","VIPS"],
+    "KR":     ["005930.KS","000660.KS","035420.KS","005380.KS","051910.KS","055550.KS"],
+    "SG":     ["D05.SI","O39.SI","U11.SI","Z74.SI","C6L.SI","G13.SI","S68.SI","Y92.SI"],
+    "BR":     ["PETR4.SA","VALE3.SA","ITUB4.SA","BBDC4.SA","ABEV3.SA","WEGE3.SA","MGLU3.SA"],
+    "ZA":     ["NPN.JO","AGL.JO","SOL.JO","FSR.JO","SBK.JO","MTN.JO","NED.JO","BID.JO"],
+    "AE":     ["FAB.AD","ENBD.DU","EMAAR.DU","DIB.DU","ETISALAT.AD","ADCB.AD","ALDAR.AD"],
+    "MX":     ["AMXL.MX","FEMSAUBD.MX","WALMEX.MX","GFNORTEO.MX","CEMEXCPO.MX","BIMBOA.MX"],
+    "NG":     ["DANGCEM.LG","GTCO.LG","MTNN.LG","ZENITHBANK.LG"],
+    "GLOBAL": ["AAPL","MSFT","NVDA","TSLA","AMZN","BABA","RELIANCE.NS","SAP.DE",
+               "9984.T","SHOP.TO","BHP.AX","MC.PA","005930.KS","NESN.SW","TSM"],
+}
+
+# ETF/Crypto symbols for the dedicated ETF/Crypto view
+ETF_SYMBOLS  = ["SPY","QQQ","VTI","IWM","EFA","VWO","GLD","SLV","USO","TLT",
+                "VNQ","XLK","XLF","XLE","ARKK","SCHD","JEPI","BND","HYG","EMB"]
+CRYPTO_SYMBOLS = ["BTC-USD","ETH-USD","BNB-USD","SOL-USD","XRP-USD","ADA-USD",
+                  "DOGE-USD","AVAX-USD","DOT-USD","MATIC-USD","LINK-USD","UNI-USD",
+                  "ATOM-USD","LTC-USD","TRX-USD","SHIB-USD"]
+FOREX_SYMBOLS  = ["EURUSD=X","GBPUSD=X","USDJPY=X","USDINR=X","USDCNY=X",
+                  "USDKRW=X","USDAUD=X","USDCAD=X","USDSGD=X","USDBRL=X"]
+COMMODITY_SYMS = ["GC=F","CL=F","SI=F","NG=F","ZW=F","ZC=F","HG=F","PL=F"]
+
+
+def get_market_symbols_for_country(code):
+    """Return the right symbol list for the current viewed country."""
+    if code in MARKET_SYMBOLS:
+        return MARKET_SYMBOLS[code]
+    return MARKET_SYMBOLS["GLOBAL"]
+
+_market_data   = {}   # sym -> price info (same format as _stock_data)
+_market_status = "Loading market data…"
+_market_last   = 0.0
+_MARKET_LOCK   = threading.Lock()
+MARKET_REFRESH = 300  # 5 min
+
+
+def fetch_market_bg(symbols=None):
+    """Fetch market symbols for current country. symbols=None means auto from country."""
+    global _market_data, _market_status, _market_last
+    _market_status = "Fetching market data…"
+    if symbols is None:
+        code    = get_user_country() or "GLOBAL"
+        symbols = get_market_symbols_for_country(code)
+    fetched = {}
+    for sym in symbols:
+        result = _fetch_stock_price(sym)
+        if result:
+            fetched[sym.upper()] = result
+    if fetched:
+        with _MARKET_LOCK:
+            _market_data = fetched
+        _market_status = f"Updated {datetime.datetime.now().strftime('%H:%M')}"
+    else:
+        _market_status = "Market data unavailable"
+    _market_last = time.time()
+
+
+def get_market_data():
+    with _MARKET_LOCK:
+        return dict(_market_data)
+
+
+def _market_refresh_loop():
+    global _market_last
+    while True:
+        if time.time() - _market_last >= MARKET_REFRESH:
+            fetch_market_bg()
+        time.sleep(10)
+
+
+# ── ETF / Crypto / Forex / Commodity data ────────────────────────────────────
+_etf_data      = {}
+_crypto_data   = {}
+_etf_status    = "Loading…"
+_crypto_status = "Loading…"
+_etf_last      = 0.0
+_crypto_last   = 0.0
+_ETF_LOCK      = threading.Lock()
+_CRYPTO_LOCK   = threading.Lock()
+EC_REFRESH     = 300   # 5 min
+
+def fetch_etf_bg():
+    global _etf_data, _etf_status, _etf_last
+    _etf_status = "Fetching ETFs…"
+    d = {}
+    for sym in ETF_SYMBOLS:
+        r = _fetch_stock_price(sym)
+        if r: d[sym] = r
+    with _ETF_LOCK:
+        _etf_data = d
+    _etf_status = f"ETFs updated {datetime.datetime.now().strftime('%H:%M')}"
+    _etf_last   = time.time()
+
+def fetch_crypto_bg():
+    global _crypto_data, _crypto_status, _crypto_last
+    _crypto_status = "Fetching crypto…"
+    d = {}
+    for sym in CRYPTO_SYMBOLS + FOREX_SYMBOLS + COMMODITY_SYMS:
+        r = _fetch_stock_price(sym)
+        if r: d[sym] = r
+    with _CRYPTO_LOCK:
+        _crypto_data = d
+    _crypto_status = f"Crypto updated {datetime.datetime.now().strftime('%H:%M')}"
+    _crypto_last   = time.time()
+
+def get_etf_data():
+    with _ETF_LOCK: return dict(_etf_data)
+
+def get_crypto_data():
+    with _CRYPTO_LOCK: return dict(_crypto_data)
+
+def _etf_crypto_refresh_loop():
+    global _etf_last, _crypto_last
+    while True:
+        now = time.time()
+        if now - _etf_last   >= EC_REFRESH: fetch_etf_bg()
+        if now - _crypto_last >= EC_REFRESH: fetch_crypto_bg()
+        time.sleep(15)
+
+
 def load_stock_watchlist():
     """Load user's stock watchlist from disk."""
     path = os.path.join(os.path.expanduser("~"), ".terminal_standby_watchlist.json")
@@ -4253,17 +4686,41 @@ def get_stock_data():
 
 # ─── Auto-refresh scheduler ────────────────────────────────────────────────
 def _news_refresh_loop():
+    """Auto-refresh news periodically. Uses short sleeps so manual refresh
+    (which updates _news_last to 0) can trigger an immediate re-fetch."""
+    global _news_last
     while True:
-        fetch_news_bg()
-        time.sleep(NEWS_REFRESH_SECS)
+        now = time.time()
+        if now - _news_last >= NEWS_REFRESH_SECS:
+            fetch_news_bg()
+        time.sleep(5)   # check every 5 s; manual refresh sets _news_last=0
 
 def _stocks_refresh_loop():
-    wl = load_stock_watchlist()
+    """Auto-refresh stocks periodically. Short sleep so watchlist changes
+    and manual refreshes are picked up quickly."""
+    global _stocks_last
     while True:
-        fetch_stocks_bg(wl)
-        # Reload watchlist each cycle so new additions are picked up
-        wl = load_stock_watchlist()
-        time.sleep(STOCKS_REFRESH_SECS)
+        wl  = load_stock_watchlist()
+        now = time.time()
+        if now - _stocks_last >= STOCKS_REFRESH_SECS:
+            fetch_stocks_bg(wl)
+        time.sleep(5)
+
+def _currency_refresh_loop():
+    """Periodically refresh viewed-country-currency -> home-currency exchange rate."""
+    global _currency_last
+    while True:
+        now      = time.time()
+        home_cur = get_home_currency()   # fast after first call (cached in memory)
+        code     = get_user_country() or "GLOBAL"
+        view_cur = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"]).get("currency", "USD")
+        # Fetch whenever: due for refresh OR rate not yet in cache
+        needs_fetch = (now - _currency_last >= CURRENCY_REFRESH or
+                       (home_cur and view_cur and home_cur != view_cur and
+                        get_currency_rate(view_cur, home_cur) is None))
+        if home_cur and view_cur and home_cur != view_cur and needs_fetch:
+            fetch_currency_bg(view_cur, home_cur)
+        time.sleep(15)   # check every 15 s so new country triggers fast
 
 # Load cached data immediately on startup
 def _load_cached_news():
@@ -4290,8 +4747,12 @@ def _load_cached_stocks():
 
 _load_cached_news()
 _load_cached_stocks()
-threading.Thread(target=_news_refresh_loop,   daemon=True).start()
-threading.Thread(target=_stocks_refresh_loop, daemon=True).start()
+threading.Thread(target=_news_refresh_loop,       daemon=True).start()
+threading.Thread(target=_stocks_refresh_loop,     daemon=True).start()
+threading.Thread(target=_currency_refresh_loop,   daemon=True).start()
+threading.Thread(target=_market_refresh_loop,     daemon=True).start()
+threading.Thread(target=_etf_crypto_refresh_loop, daemon=True).start()
+threading.Thread(target=get_home_currency,        daemon=True).start()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4299,15 +4760,23 @@ threading.Thread(target=_stocks_refresh_loop, daemon=True).start()
 # ══════════════════════════════════════════════════════════════════════════════
 
 class NewsStocksState:
-    scroll        = 0        # news scroll offset
-    tab           = 0        # 0=news, 1=stocks, 2=country
-    stock_input   = False    # adding new ticker
-    stock_buf     = ""
-    stock_cur     = 0        # selected row in stocks list
-    country_cur   = 0        # cursor in country picker
-    country_mode  = False    # True = country picker overlay open
-    msg           = ""
-    msg_time      = 0.0
+    def __init__(self):
+        self.scroll        = 0
+        self.tab           = 0        # 0=news  1=stocks
+        self.stock_screen  = 0        # 0=market/trending  1=portfolio
+        self.stock_input   = False    # adding ticker in portfolio
+        self.stock_buf     = ""
+        self.stock_cur     = 0        # cursor in portfolio list
+        self.market_cur    = 0        # cursor in market trending list
+        self.country_cur   = 0
+        self.country_mode  = False
+        self.msg           = ""
+        self.msg_time      = 0.0
+        # mouse / keyboard item selection
+        self.news_row_map  = {}
+        self.tab_regions   = []
+        self.stock_sub_regions = []  # [(x0,x1,screen_idx)] for M/P sub-tabs
+        self.news_cursor   = -1
 
 NSS = NewsStocksState()
 
@@ -4340,10 +4809,13 @@ def v_news_stocks(win, W, H):
 
     tabs = [("  NEWS  ", 0), ("  STOCKS  ", 1)]
     tx = 2
+    NSS.tab_regions = []   # rebuilt every frame
     for lbl, idx in tabs:
         active = (NSS.tab == idx)
         attr   = cp(P_CYAN, bold=True) | curses.A_REVERSE if active else cp(P_DIM)
         put(win, 1, tx, lbl, attr)
+        # record hit region: columns tx..(tx+len(lbl)), row 1
+        NSS.tab_regions.append((tx, tx + len(lbl), idx))
         tx += len(lbl) + 1
 
     country_lbl = f"  {flag} {cname} "
@@ -4423,7 +4895,6 @@ def _draw_country_overlay(win, W, H):
 
 
 def _draw_news_tab(win, W, H, items):
-    # Status line with country info
     code   = get_user_country() or "GLOBAL"
     c_info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
     flag   = c_info["flag"]; cname = c_info["name"]
@@ -4432,153 +4903,376 @@ def _draw_news_tab(win, W, H, items):
 
     if not items:
         centre(win, H // 2, "  No news items. Check internet connection.  ", cp(P_AMBER))
-        put(win, H-1, 0, " [1] News  [2] Stocks  [j/k] scroll  [r] refresh  [←→] views ", cp(P_DIM))
+        put(win, H-1, 0,
+            " [1] News  [2] Stocks  [j/k] scroll  [r] refresh  [←→] views ",
+            cp(P_DIM))
         return
 
-    content_h = H - 7   # rows available for news
-    visible   = []
-    # Each item: title line + source/time line + blank = 3 lines
-    for item in items:
-        visible.append(item)
-
-    # Clamp scroll
-    max_scroll = max(0, len(visible) * 3 - content_h)
+    content_h = H - 7
+    max_scroll = max(0, len(items) * 3 - content_h)
     NSS.scroll = max(0, min(NSS.scroll, max_scroll))
 
-    # Draw news list
+    src_colors = {
+        "Reuters": P_CYAN, "BBC News": P_RED, "AP News": P_AMBER,
+        "Al Jazeera": P_GREEN, "Times of India": P_AMBER,
+        "Hindu": P_GREEN, "NDTV": P_BLUE, "India Today": P_PINK,
+    }
+
+    # Rebuild row→item map every frame
+    NSS.news_row_map = {}
+
     y      = 5
     offset = NSS.scroll
-    src_colors = {"Reuters": P_CYAN, "BBC News": P_RED, "AP News": P_AMBER, "Al Jazeera": P_GREEN}
 
-    for i, item in enumerate(visible):
-        title   = item["title"]
-        source  = item["source"]
-        ts      = item["time"]
-        src_col = src_colors.get(source, P_BLUE)
+    for i, item in enumerate(items):
+        title    = item.get("title", "")
+        source   = item.get("source", "")
+        ts       = item.get("time", "")
+        url      = item.get("url", "")
+        src_col  = src_colors.get(source, P_BLUE)
+        selected = (i == NSS.news_cursor)
 
-        # 3 virtual lines per item: bullet+title, source·time, blank spacer
-        lines = [
-            (f"  ● {title}", P_HI,    True,    src_col),
-            (f"    ╰ {source}  ·  {ts}", src_col, False, src_col),
-            ("", P_DIM, False, P_DIM),
-        ]
-        for txt, col, bold, _ in lines:
+        # Each item = 3 rows: [0] title  [1] source+time  [2] blank
+        for row_idx in range(3):
             if offset > 0:
                 offset -= 1
                 continue
             if y >= H - 2:
                 break
-            # Subtle alternating row tint
-            if i % 2 == 0:
-                put(win, y, 0, " " * (W - 1), cp(P_DIM))
-            put(win, y, 0, txt[:W - 2], cp(col, bold=bold))
+
+            # Map title row AND source row to this item index for click detection
+            if row_idx < 2:
+                NSS.news_row_map[y] = i
+
+            if row_idx == 0:
+                # ── Title row ──
+                bullet = "▶" if selected else "●"
+                prefix = f"  {bullet} "
+                title_display = (prefix + title)[:W - 2]
+                if selected:
+                    put(win, y, 0, " " * (W - 1), cp(P_AMBER))
+                    put(win, y, 0, title_display, cp(P_AMBER, bold=True) | curses.A_REVERSE)
+                else:
+                    if i % 2 == 0:
+                        put(win, y, 0, " " * (W - 1), cp(P_DIM))
+                    put(win, y, 0, title_display, cp(P_HI, bold=True))
+
+            elif row_idx == 1:
+                # ── Source + time + url hint row ──
+                link_hint = "  [ENTER/click again to open →]" if (selected and url) else (
+                            "  🔗" if url else "")
+                src_display = (f"    ╰ {source}  ·  {ts}{link_hint}")[:W - 2]
+                if selected:
+                    put(win, y, 0, " " * (W - 1), cp(P_AMBER))
+                    put(win, y, 0, src_display, cp(P_CYAN))
+                else:
+                    if i % 2 == 0:
+                        put(win, y, 0, " " * (W - 1), cp(P_DIM))
+                    put(win, y, 0, src_display, cp(src_col))
+
+            else:
+                # ── Blank spacer row ──
+                pass
+
             y += 1
+
         if y >= H - 2:
             break
 
-    # Scroll indicator
+    # Scroll bar
     if max_scroll > 0:
-        pct = int(NSS.scroll / max_scroll * (H - 7))
+        bar_h = H - 7
+        pct   = int(NSS.scroll / max_scroll * bar_h)
         for sy in range(5, H - 2):
             put(win, sy, W - 1, "│", cp(P_BOX))
-        put(win, 5 + pct, W - 1, "█", cp(P_DIM))
+        put(win, min(5 + pct, H - 3), W - 1, "█", cp(P_DIM))
 
-    put(win, H-1, 0, " [j/k] scroll  [r] refresh  [C] change country  [2] stocks  [←→] views  [q] quit ", cp(P_DIM))
+    # Status bar — msg takes priority, then URL of selected item, then default hint
+    if NSS.msg and time.time() - NSS.msg_time < 4.0:
+        col = P_GREEN if "Opening" in NSS.msg else P_AMBER
+        put(win, H-1, 0, f" {NSS.msg} "[:W], cp(col, bold=True))
+    elif 0 <= NSS.news_cursor < len(items):
+        sel_url = items[NSS.news_cursor].get("url", "")
+        if sel_url:
+            hint = f" ↵ ENTER / click to open  ·  {sel_url}"
+            put(win, H-1, 0, hint[:W], cp(P_CYAN, bold=True))
+        else:
+            put(win, H-1, 0,
+                " [j/k] move  [ENTER] open link  [ESC] deselect  [r] refresh  [C] country  [q] quit ",
+                cp(P_DIM))
+    else:
+        put(win, H-1, 0,
+            " [j/k] select item  [ENTER] open in browser  [r] refresh  [C] country  [q] quit ",
+            cp(P_DIM))
 
 
 def _draw_stocks_tab(win, W, H, stocks, watchlist):
-    code   = get_user_country() or "GLOBAL"
-    c_info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
-    flag   = c_info["flag"]; cname = c_info["name"]
-    put(win, 3, 2, f"[ {flag} {cname}  ·  {_stocks_status}  ·  refreshes every 5 min ]", cp(P_DIM))
+    code     = get_user_country() or "GLOBAL"
+    c_info   = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+    flag     = c_info["flag"]; cname = c_info["name"]
+    view_cur = c_info.get("currency", "USD")
+    home_cur = get_home_currency()
+
+    # Kick off currency fetch if needed
+    if home_cur and view_cur and home_cur != view_cur:
+        if get_currency_rate(view_cur, home_cur) is None:
+            threading.Thread(target=lambda vc=view_cur, hc=home_cur:
+                             fetch_currency_bg(vc, hc), daemon=True).start()
+
+    # ── Sub-tab bar: MARKET | PORTFOLIO ───────────────────────────────────────
+    sub_tabs = [(" 📈 MARKET ", 0), (" 💼 PORTFOLIO ", 1)]
+    NSS.stock_sub_regions = []
+    tx = 2
+    put(win, 3, 0, " " * W, cp(P_DIM))
+    for lbl, idx in sub_tabs:
+        active = (NSS.stock_screen == idx)
+        attr   = cp(P_GREEN, bold=True) | curses.A_REVERSE if active else cp(P_DIM)
+        put(win, 3, tx, lbl, attr)
+        NSS.stock_sub_regions.append((tx, tx + len(lbl), idx))
+        tx += len(lbl) + 1
+
+    # Currency banner inline on row 3 right side
+    if home_cur and view_cur and home_cur != view_cur:
+        rate = get_currency_rate(view_cur, home_cur)
+        if rate:
+            cur_s = f"💱 1 {view_cur} = {rate:.4f} {home_cur}  "
+        else:
+            cur_s = f"💱 {view_cur}/{home_cur} loading…  "
+        put(win, 3, W - len(cur_s) - 2, cur_s, cp(P_CYAN))
+
     put(win, 4, 0, "─" * W, cp(P_BOX))
 
-    # Fixed column widths that scale with terminal width
-    C_SYM  = 2
-    W_SYM  = 8    # "▶ AAPL  "
+    _CUR_SYM = {
+        "USD":"$","EUR":"€","GBP":"£","JPY":"¥","INR":"₹","CNY":"¥",
+        "KRW":"₩","AUD":"A$","CAD":"C$","SGD":"S$","BRL":"R$",
+        "ZAR":"R","AED":"د.إ","NGN":"₦","MXN":"$","HKD":"HK$",
+    }
+    csym = _CUR_SYM.get(view_cur, view_cur + " ")
+
+    if NSS.stock_screen == 0:
+        _draw_market_screen(win, W, H, csym)
+    else:
+        _draw_portfolio_screen(win, W, H, stocks, watchlist, csym, view_cur, home_cur)
+
+
+# ── Column layout helper ──────────────────────────────────────────────────────
+def _stock_cols(W):
+    C_SYM  = 2;  W_SYM  = 10
     C_NAME = C_SYM + W_SYM
-    W_NAME = max(16, W - C_NAME - 32)  # flex
+    W_NAME = max(14, W - C_NAME - 34)
     C_PX   = C_NAME + W_NAME
     C_CHG  = C_PX  + 13
-    C_PCT  = C_CHG + 13
+    C_PCT  = C_CHG + 11
+    return C_SYM, W_SYM, C_NAME, W_NAME, C_PX, C_CHG, C_PCT
 
-    hdr_line = (f"{'  SYM':<{W_SYM}}{'NAME':<{W_NAME}}{'PRICE':>12}  {'CHANGE':>10}  {'%':>8}")
-    put(win, 5, C_SYM, hdr_line[:W - 4], cp(P_DIM))
+
+def _draw_stock_row(win, y, W, sym, info, csym, sel, cursor_col=P_AMBER):
+    C_SYM, W_SYM, C_NAME, W_NAME, C_PX, C_CHG, C_PCT = _stock_cols(W)
+    rev = curses.A_REVERSE if sel else 0
+    if sel:
+        put(win, y, 0, " " * (W - 1), cp(cursor_col) | rev)
+    if info:
+        price  = info["price"]; change = info["change"]; pct = info["pct"]
+        name   = info.get("name", sym)
+        arrow  = "▲" if change > 0 else ("▼" if change < 0 else "─")
+        cc     = P_GREEN if change > 0 else (P_RED if change < 0 else P_MID)
+        price_s  = f"{csym}{price:>9.2f}"
+        change_s = f"{arrow}{abs(change):>7.2f}"
+        pct_s    = f"{pct:>+6.2f}%"
+    else:
+        name = "loading…"; arrow = ""; cc = P_DIM
+        price_s = "         ─"; change_s = "       ─"; pct_s = "      ─"
+
+    sym_lbl = f" {'▶' if sel else ' '} {sym[:7]:<7}"
+    put(win, y, C_SYM,  sym_lbl,                   cp(cursor_col if sel else P_CYAN, bold=True) | rev)
+    put(win, y, C_NAME, name[:W_NAME],              cp(P_MID) | rev)
+    put(win, y, C_PX,   price_s,                    cp(P_HI, bold=True) | rev)
+    put(win, y, C_CHG,  f"  {change_s}",            cp(cc, bold=True) | rev)
+    put(win, y, C_PCT,  f" {pct_s}",                cp(cc) | rev)
+
+
+def _draw_stock_header(win, y, W):
+    C_SYM, W_SYM, C_NAME, W_NAME, C_PX, C_CHG, C_PCT = _stock_cols(W)
+    hdr = f"{'  SYMBOL':<{W_SYM+2}}{'NAME':<{W_NAME}}{'PRICE':>11}  {'CHANGE':>9}  {'%':>7}"
+    put(win, y,   C_SYM, hdr[:W-4], cp(P_DIM))
+    put(win, y+1, 0,     "─" * W,   cp(P_BOX))
+
+
+# ── MARKET screen ─────────────────────────────────────────────────────────────
+def _draw_market_screen(win, W, H, csym):
+    data  = get_market_data()
+    code  = get_user_country() or "GLOBAL"
+    c_info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+    flag  = c_info["flag"]; cname = c_info["name"]
+    put(win, 5, 2, f"[ {flag} {cname}  ·  {_market_status}  ·  {len(data)} symbols  ·  5 min refresh ]", cp(P_DIM))
     put(win, 6, 0, "─" * W, cp(P_BOX))
 
+    if not data:
+        centre(win, H//2, "  Fetching market data…  ", cp(P_AMBER))
+        put(win, H-1, 0, " [r] refresh  [m] market  [p] portfolio  [q] quit ", cp(P_DIM))
+        return
+
+    # Sort into gainers / losers / neutral
+    rows = []
+    for sym, info in data.items():
+        rows.append((sym, info))
+    rows.sort(key=lambda x: x[1]["pct"], reverse=True)
+
+    gainers  = [(s, i) for s, i in rows if i["pct"] >  0.05]
+    losers   = [(s, i) for s, i in rows if i["pct"] < -0.05]
+    neutral  = [(s, i) for s, i in rows if -0.05 <= i["pct"] <= 0.05]
+
+    # Sections: TOP GAINERS | TOP LOSERS | NEUTRAL
+    # Each section up to 5 rows; header row + data rows
+    SECTION_CAP = 5
+    sections = [
+        ("🚀 TOP GAINERS",  P_GREEN, gainers[:SECTION_CAP]),
+        ("💥 TOP LOSERS",   P_RED,   losers[-SECTION_CAP:][::-1]),   # worst first
+        ("😐 FLAT / MIXED", P_MID,   neutral[:SECTION_CAP]),
+    ]
+
     y = 7
+    _draw_stock_header(win, y, W)
+    y += 2
+
+    NSS.market_cur = max(0, min(NSS.market_cur, max(0, len(rows) - 1)))
+
+    flat_list = []  # all drawn rows in order for cursor nav
+    for sec_title, sec_col, sec_rows in sections:
+        if not sec_rows:
+            continue
+        if y >= H - 4:
+            break
+        put(win, y, 2, f" {sec_title} ", cp(sec_col, bold=True) | curses.A_BOLD)
+        y += 1
+        for sym, info in sec_rows:
+            if y >= H - 3:
+                break
+            flat_idx = len(flat_list)
+            flat_list.append((sym, info))
+            sel = (flat_idx == NSS.market_cur)
+            _draw_stock_row(win, y, W, sym, info, csym, sel, cursor_col=sec_col)
+            y += 1
+
+    # bottom panel
+    put(win, H-2, 0, "─" * W, cp(P_BOX))
+    if 0 <= NSS.market_cur < len(flat_list):
+        sym, info = flat_list[NSS.market_cur]
+        pct = info["pct"]
+        pc  = P_GREEN if pct > 0 else (P_RED if pct < 0 else P_MID)
+        put(win, H-1, 0,
+            f" ▶  {sym}  {info['name'][:30]}  {pct:+.2f}%   [r] refresh  [p] portfolio  [q] quit ",
+            cp(pc, bold=True))
+    else:
+        put(win, H-1, 0,
+            " [j/k] navigate  [r] refresh  [p] portfolio  [m] market  [q] quit ",
+            cp(P_DIM))
+
+
+# ── PORTFOLIO screen ──────────────────────────────────────────────────────────
+def _draw_portfolio_screen(win, W, H, stocks, watchlist, csym, view_cur, home_cur):
+    # Header stats
+    total_val = 0.0
+    total_chg = 0.0
+    for sym in watchlist:
+        info = stocks.get(sym.upper())
+        if info:
+            total_val += info["price"]
+            total_chg += info["change"]
+
+    rate     = get_currency_rate(view_cur, home_cur) if home_cur != view_cur else 1.0
+    _CUR_SYM = {"USD":"$","EUR":"€","GBP":"£","JPY":"¥","INR":"₹","CNY":"¥",
+                "KRW":"₩","AUD":"A$","CAD":"C$","SGD":"S$","BRL":"R$",
+                "ZAR":"R","AED":"د.إ","NGN":"₦","MXN":"$","HKD":"HK$"}
+    home_sym = _CUR_SYM.get(home_cur, home_cur + " ")
+
+    chg_col = P_GREEN if total_chg >= 0 else P_RED
+    put(win, 5, 2,
+        f"[ {_stocks_status}  ·  {len(watchlist)} tickers ]",
+        cp(P_DIM))
+
+    if watchlist and rate and home_cur != view_cur:
+        home_val = total_val * rate
+        put(win, 5, W - 28,
+            f"≈ {home_sym}{home_val:,.2f} {home_cur}",
+            cp(P_CYAN))
+
+    put(win, 6, 0, "─" * W, cp(P_BOX))
+
+    if not watchlist:
+        centre(win, H//2 - 1, "Your portfolio is empty", cp(P_DIM))
+        centre(win, H//2,     "Press  [a]  to add a ticker", cp(P_AMBER))
+        centre(win, H//2 + 1,
+               "Works with: AAPL  INFY.NS  BTC-USD  ETH-USD  EURUSD=X  GC=F",
+               cp(P_DIM))
+        put(win, H-1, 0, " [a] add ticker  [m] market view  [q] quit ", cp(P_DIM))
+        return
+
+    _draw_stock_header(win, 7, W)
+    y = 9
     NSS.stock_cur = max(0, min(NSS.stock_cur, max(0, len(watchlist) - 1)))
 
     for i, sym in enumerate(watchlist):
-        if y >= H - 5:
+        if y >= H - 6:
             break
         sel  = (i == NSS.stock_cur)
         info = stocks.get(sym.upper())
-
-        if info:
-            price  = info["price"]
-            change = info["change"]
-            pct    = info["pct"]
-            name   = info["name"]
-            if change > 0:
-                chg_col = P_GREEN; arrow = "▲"
-            elif change < 0:
-                chg_col = P_RED;   arrow = "▼"
-            else:
-                chg_col = P_MID;   arrow = "─"
-            price_s  = f"${price:>10.2f}"
-            change_s = f"{arrow}{abs(change):>8.2f}"
-            pct_s    = f"{pct:>+7.2f}%"
+        # Detect asset class from symbol for colour accent
+        sym_up = sym.upper()
+        if any(x in sym_up for x in ("BTC","ETH","SOL","BNB","XRP","DOGE","ADA","USDT","=X","CRYPTO")):
+            accent = P_PINK   # crypto / forex
+        elif "=F" in sym_up or sym_up in ("GLD","SLV","USO"):
+            accent = P_AMBER  # commodities / ETFs
+        elif any(sym_up.endswith(x) for x in (".NS",".BO",".DE",".PA",".TO",".AX",".SI",".HK",".T",".KS",".L",".JO",".SA",".MX",".AD",".DU")):
+            accent = P_CYAN   # international
         else:
-            name     = "Loading…"
-            price_s  = "          ─"
-            change_s = "          ─"
-            pct_s    = "       ─"
-            chg_col  = P_DIM
-            arrow    = ""
+            accent = P_GREEN  # US / default equity
 
-        sym_lbl  = f" {'▶' if sel else ' '} {sym:<6}"
-        name_lbl = name[:W_NAME]
-        row_base = cp(P_AMBER if sel else P_HI, bold=sel)
-        rev      = curses.A_REVERSE if sel else 0
-
-        if sel:
-            put(win, y, 0, " " * (W - 1), cp(P_AMBER) | rev)
-
-        put(win, y, C_SYM,  sym_lbl,                      cp(P_AMBER if sel else P_CYAN, bold=True) | rev)
-        put(win, y, C_NAME, f"{name_lbl:<{W_NAME}}",      cp(P_MID)   | rev)
-        put(win, y, C_PX,   price_s,                       cp(P_HI, bold=True) | rev)
-        if info:
-            put(win, y, C_CHG,  f"  {change_s}",           cp(chg_col, bold=True) | rev)
-            put(win, y, C_PCT,  f"  {pct_s}",              cp(chg_col) | rev)
-        else:
-            put(win, y, C_CHG,  f"  {change_s}",           cp(P_DIM) | rev)
+        _draw_stock_row(win, y, W, sym, info, csym, sel, cursor_col=accent)
         y += 1
 
-    # Add / remove panel
-    panel_y = max(y + 1, H - 7)
-    put(win, panel_y, 0, "─" * W, cp(P_BOX))
+    # ── Summary bar ──────────────────────────────────────────────────────────
+    loaded = [stocks.get(s.upper()) for s in watchlist if stocks.get(s.upper())]
+    if loaded:
+        gainers_n = sum(1 for i in loaded if i["pct"] >  0.05)
+        losers_n  = sum(1 for i in loaded if i["pct"] < -0.05)
+        neut_n    = len(loaded) - gainers_n - losers_n
+        summary   = f" ▲ {gainers_n} up   ▼ {losers_n} down   — {neut_n} flat "
+        put(win, max(y + 1, H - 6), 0, "─" * W, cp(P_BOX))
+        put(win, max(y + 2, H - 5), 2, summary, cp(chg_col, bold=True))
 
+    # ── Input panel ──────────────────────────────────────────────────────────
+    panel_y = H - 4
+    put(win, panel_y, 0, "─" * W, cp(P_BOX))
     blink = "█" if int(time.time() * 2) % 2 else " "
     if NSS.stock_input:
-        put(win, panel_y + 1, 2, "Add ticker: ", cp(P_DIM))
-        put(win, panel_y + 1, 14, (NSS.stock_buf.upper() + blink)[:W - 17], cp(P_AMBER, bold=True))
-        put(win, panel_y + 2, 2, "ENTER=confirm   ESC=cancel   (e.g. NVDA, INFY.NS, BTC-USD)", cp(P_DIM))
+        put(win, panel_y + 1, 2,
+            "Add ticker (any market):  ", cp(P_DIM))
+        put(win, panel_y + 1, 28,
+            (NSS.stock_buf.upper() + blink)[:W - 31], cp(P_AMBER, bold=True))
+        put(win, panel_y + 2, 2,
+            "Stocks: AAPL  INFY.NS  RELIANCE.NS  SAP.DE  BABA    "
+            "Crypto: BTC-USD  ETH-USD  SOL-USD    "
+            "Forex: USDINR=X    ETF: SPY  QQQ", cp(P_DIM))
     else:
         if NSS.msg and time.time() - NSS.msg_time < 4:
-            col = P_GREEN if "Added" in NSS.msg or "Removed" in NSS.msg else P_RED
-            put(win, panel_y + 1, 2, NSS.msg[:W - 4], cp(col, bold=True))
+            col = P_GREEN if any(w in NSS.msg for w in ("Added","Removed","Opening")) else P_RED
+            put(win, panel_y + 1, 2, NSS.msg[:W-4], cp(col, bold=True))
         else:
             put(win, panel_y + 1, 2,
-                f"Watching {len(watchlist)} ticker(s)  ·  [a]=add  [d]=remove selected  [r]=refresh now",
+                f"[a] add   [d] remove   [r] refresh   [m] market view   "
+                f"[D] reset defaults   {len(watchlist)} tickers",
                 cp(P_DIM))
 
-    put(win, H-1, 0, " [j/k] select  [a] add  [d] remove  [D] reset to country defaults  [C] country  [r] refresh  [←→] views ", cp(P_DIM))
+    put(win, H-1, 0,
+        " [j/k] navigate  [a] add  [d] remove  [D] reset  [m] market  [r] refresh  [←→] views ",
+        cp(P_DIM))
 
 
 # ── Key handling for view 8 (News & Stocks) ──────────────────────────────────
 def _handle_news_stocks_key(k):
     """Handle keypresses for the news/stocks view."""
+    global _news_items, _news_last, _stocks_last, _currency_last, _market_last
     n_countries = len(COUNTRY_LIST)
 
     # ── First-run country setup (no country set yet) ──────────────────────────
@@ -4593,6 +5287,7 @@ def _handle_news_stocks_key(k):
             # Immediately trigger fresh fetch for new country
             threading.Thread(target=fetch_news_bg,   daemon=True).start()
             threading.Thread(target=lambda: fetch_stocks_bg(load_stock_watchlist()), daemon=True).start()
+            _currency_last = 0.0   # trigger currency fetch for new country
             NSS.msg = f"Country set to {COUNTRY_DB[code]['name']}"; NSS.msg_time = time.time()
         return
 
@@ -4610,10 +5305,13 @@ def _handle_news_stocks_key(k):
             if code != old:
                 # Wipe cached news so new country feeds load fresh
                 with _NEWS_LOCK:
-                    global _news_items
                     _news_items = []
                 threading.Thread(target=fetch_news_bg,   daemon=True).start()
                 threading.Thread(target=lambda: fetch_stocks_bg(load_stock_watchlist()), daemon=True).start()
+                threading.Thread(target=fetch_market_bg, daemon=True).start()
+                # Refresh currency rate for new country
+                _currency_last = 0.0
+                _market_last   = 0.0
             NSS.msg = f"Switched to {COUNTRY_DB[code]['name']}"; NSS.msg_time = time.time()
         elif k == 27:  # ESC
             NSS.country_mode = False
@@ -4633,18 +5331,66 @@ def _handle_news_stocks_key(k):
         return
     if k == ord('r'):
         if NSS.tab == 0:
+            _news_last = 0.0
             threading.Thread(target=fetch_news_bg, daemon=True).start()
+        elif NSS.stock_screen == 0:
+            _market_last = 0.0
+            threading.Thread(target=fetch_market_bg, daemon=True).start()
         else:
+            _stocks_last = 0.0
             threading.Thread(target=lambda: fetch_stocks_bg(load_stock_watchlist()), daemon=True).start()
         return
 
     if NSS.tab == 0:  # ── news tab ──────────────────────────────────────────
+        items   = get_news_items()
+        n_items = len(items)
         if k in (ord('j'), curses.KEY_DOWN):
-            NSS.scroll += 3
+            # j always moves selection down; auto-enter cursor mode at item 0
+            if NSS.news_cursor < 0:
+                NSS.news_cursor = 0
+            else:
+                NSS.news_cursor = min(n_items - 1, NSS.news_cursor + 1)
+            # keep selected item visible
+            NSS.scroll = NSS.news_cursor * 3
         elif k in (ord('k'), curses.KEY_UP):
-            NSS.scroll = max(0, NSS.scroll - 3)
+            if NSS.news_cursor <= 0:
+                NSS.news_cursor = 0
+                NSS.scroll = 0
+            else:
+                NSS.news_cursor -= 1
+                NSS.scroll = NSS.news_cursor * 3
+        elif k == 27:   # ESC — deselect, back to free scroll
+            NSS.news_cursor = -1
+        elif k in (10, 13):  # ENTER — open URL
+            if 0 <= NSS.news_cursor < n_items:
+                url = items[NSS.news_cursor].get("url", "")
+                if url:
+                    _open_url(url)
+                else:
+                    NSS.msg = "No link for this item"; NSS.msg_time = time.time()
 
     elif NSS.tab == 1:  # ── stocks tab ────────────────────────────────────────
+        # m / p switch between Market and Portfolio sub-screens
+        if k == ord('m'):
+            NSS.stock_screen = 0; return
+        if k == ord('p'):
+            NSS.stock_screen = 1; return
+
+        if NSS.stock_screen == 0:
+            # ── MARKET screen navigation ──────────────────────────────────────
+            market = get_market_data()
+            n_mkt  = len(market)
+            if k in (ord('j'), curses.KEY_DOWN):
+                NSS.market_cur = min(max(0, n_mkt - 1), NSS.market_cur + 1)
+            elif k in (ord('k'), curses.KEY_UP):
+                NSS.market_cur = max(0, NSS.market_cur - 1)
+            elif k == ord('r'):
+                _market_last   = 0.0
+                threading.Thread(target=fetch_market_bg, daemon=True).start()
+                NSS.msg = "Refreshing market data…"; NSS.msg_time = time.time()
+            return
+
+        # ── PORTFOLIO screen ─────────────────────────────────────────────────
         if NSS.stock_input:
             if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
                 NSS.stock_buf = NSS.stock_buf[:-1]
@@ -4662,13 +5408,13 @@ def _handle_news_stocks_key(k):
                         save_stock_watchlist(wl)
                         threading.Thread(target=lambda s=sym: fetch_stocks_bg([s]),
                                          daemon=True).start()
-                        NSS.msg      = f"Added {sym} — fetching price…"
+                        NSS.msg      = f"Added {sym} — fetching…"
                         NSS.msg_time = time.time()
                     else:
-                        NSS.msg      = f"{sym} is already in your watchlist"
+                        NSS.msg      = f"{sym} already in portfolio"
                         NSS.msg_time = time.time()
             elif 32 <= k <= 126:
-                if len(NSS.stock_buf) < 10:
+                if len(NSS.stock_buf) < 12:
                     NSS.stock_buf += chr(k)
         else:
             wl = load_stock_watchlist()
@@ -4680,6 +5426,7 @@ def _handle_news_stocks_key(k):
             elif k == ord('a'):
                 NSS.stock_input = True
                 NSS.stock_buf   = ""
+                NSS.stock_screen = 1  # ensure we're on portfolio screen
             elif k == ord('d') and wl:
                 idx = max(0, min(NSS.stock_cur, n - 1))
                 removed = wl.pop(idx)
@@ -4688,9 +5435,8 @@ def _handle_news_stocks_key(k):
                 NSS.msg       = f"Removed {removed}"
                 NSS.msg_time  = time.time()
             elif k == ord('D'):
-                # Reset to country defaults
-                code    = get_user_country() or "GLOBAL"
-                info    = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+                code     = get_user_country() or "GLOBAL"
+                info     = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
                 defaults = info["stocks"][:]
                 save_stock_watchlist(defaults)
                 NSS.stock_cur = 0
@@ -4700,13 +5446,305 @@ def _handle_news_stocks_key(k):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  VIEW 10 — ETF · CRYPTO · FOREX · COMMODITIES
+# ══════════════════════════════════════════════════════════════════════════════
+
+class EtfCryptoState:
+    def __init__(self):
+        self.screen     = 0      # 0=crypto  1=etf  2=forex  3=commodities
+        self.cursor     = 0
+        self.input_mode = False
+        self.input_buf  = ""
+        self.custom     = []     # user-added custom symbols for this view
+        self.msg        = ""
+        self.msg_time   = 0.0
+        self.sub_regions = []    # mouse hit regions for sub-tabs
+
+ECS = EtfCryptoState()
+
+# Load custom EC symbols from settings
+def _load_ec_custom():
+    s = load_user_settings()
+    ECS.custom = s.get("ec_custom", [])
+
+def _save_ec_custom():
+    s = load_user_settings()
+    s["ec_custom"] = ECS.custom
+    save_user_settings(s)
+
+_load_ec_custom()
+
+_CUR_SYM_MAP = {
+    "USD":"$","EUR":"€","GBP":"£","JPY":"¥","INR":"₹","CNY":"¥",
+    "KRW":"₩","AUD":"A$","CAD":"C$","SGD":"S$","BRL":"R$",
+    "ZAR":"R","AED":"د.إ","NGN":"₦","MXN":"$","HKD":"HK$",
+}
+
+def _ec_sub_header(win, W, H):
+    """Draw the 4 sub-tab buttons for the ETF/Crypto view."""
+    sub_tabs = [
+        (" 🪙 CRYPTO ",    0),
+        (" 📊 ETFs   ",    1),
+        (" 💱 FOREX  ",    2),
+        (" 🛢  COMMOD ",   3),
+    ]
+    ECS.sub_regions = []
+    tx = 2
+    put(win, 1, 0, " " * W, cp(P_DIM))
+    for lbl, idx in sub_tabs:
+        active = (ECS.screen == idx)
+        attr   = cp(P_PINK, bold=True) | curses.A_REVERSE if active else cp(P_DIM)
+        put(win, 1, tx, lbl, attr)
+        ECS.sub_regions.append((tx, tx + len(lbl), idx))
+        tx += len(lbl) + 1
+    put(win, 1, tx + 2, "[a] add custom  [d] remove  [r] refresh", cp(P_DIM))
+    put(win, 2, 0, "─" * W, cp(P_BOX))
+
+
+def _ec_draw_section(win, W, H, title, symbols, data, title_col, y_start):
+    """Draw one labelled section of symbols. Returns next y."""
+    y = y_start
+    if not symbols:
+        return y
+    put(win, y, 2, f" {title} ", cp(title_col, bold=True) | curses.A_BOLD)
+    y += 1
+
+    C_SYM, W_SYM, C_NAME, W_NAME, C_PX, C_CHG, C_PCT = _stock_cols(W)
+    for i, sym in enumerate(symbols):
+        if y >= H - 3:
+            break
+        info = data.get(sym.upper())
+        abs_i = y  # use row as rough index
+        sel   = (ECS.cursor == y_start + i + 1)  # offset by section header
+        _draw_stock_row(win, y, W, sym, info, "$", sel, cursor_col=title_col)
+        y += 1
+    return y
+
+
+def _build_ec_flat_list():
+    """Return flat list of (sym, section) for the current screen."""
+    screen = ECS.screen
+    crypto_d = get_crypto_data()
+    etf_d    = get_etf_data()
+    custom   = ECS.custom
+
+    if screen == 0:  # crypto
+        base = CRYPTO_SYMBOLS[:]
+        extras = [s for s in custom if s.endswith("-USD") or "USD" in s.upper()]
+        return [(s, "crypto") for s in base + extras]
+    elif screen == 1:  # ETF
+        base = ETF_SYMBOLS[:]
+        extras = [s for s in custom if not s.endswith("-USD") and "=" not in s and "=F" not in s]
+        return [(s, "etf") for s in base + extras]
+    elif screen == 2:  # forex
+        base = FOREX_SYMBOLS[:]
+        extras = [s for s in custom if "=X" in s]
+        return [(s, "forex") for s in base + extras]
+    else:  # commodities
+        base = COMMODITY_SYMS[:]
+        extras = [s for s in custom if "=F" in s]
+        return [(s, "commod") for s in base + extras]
+
+
+def v_etf_crypto(win, W, H):
+    _ec_sub_header(win, W, H)
+
+    crypto_d = get_crypto_data()
+    etf_d    = get_etf_data()
+    all_data = {**crypto_d, **etf_d}
+
+    screen    = ECS.screen
+    flat_list = _build_ec_flat_list()
+    n         = len(flat_list)
+    ECS.cursor = max(0, min(ECS.cursor, max(0, n - 1)))
+
+    # Status row
+    if screen == 0:
+        status = _crypto_status
+    elif screen == 1:
+        status = _etf_status
+    else:
+        status = _crypto_status  # forex & commod share crypto_data
+    put(win, 3, 2, f"[ {status}  ·  {n} symbols ]", cp(P_DIM))
+    put(win, 4, 0, "─" * W, cp(P_BOX))
+
+    if not all_data and not flat_list:
+        centre(win, H//2, "  Fetching data…  ", cp(P_AMBER))
+        put(win, H-1, 0, " [r] refresh  [←→] views  [q] quit ", cp(P_DIM))
+        return
+
+    # Header
+    _draw_stock_header(win, 5, W)
+
+    y = 7
+    home_cur = get_home_currency()
+    home_sym = _CUR_SYM_MAP.get(home_cur, home_cur + " ")
+
+    # Group gainers / losers / neutral within the section
+    loaded = [(sym, all_data.get(sym.upper())) for sym, _ in flat_list]
+    gainers = [(s, i) for s, i in loaded if i and i["pct"] >  0.1]
+    losers  = [(s, i) for s, i in loaded if i and i["pct"] < -0.1]
+    neutral = [(s, i) for s, i in loaded if i and -0.1 <= i["pct"] <= 0.1]
+    loading = [(s, i) for s, i in loaded if not i]
+
+    flat_ordered = (
+        [("🚀 TOP GAINERS", None)] +
+        sorted(gainers, key=lambda x: x[1]["pct"], reverse=True)[:8] +
+        [("💥 TOP LOSERS",  None)] +
+        sorted(losers,  key=lambda x: x[1]["pct"])[:8] +
+        [("😐 STABLE",      None)] +
+        neutral[:8]
+    )
+    if loading:
+        flat_ordered += [("⏳ LOADING", None)] + loading[:5]
+
+    cursor_map = {}  # row → (sym, info)
+    row_idx    = 0
+
+    for item in flat_ordered:
+        if y >= H - 3:
+            break
+        sym, info = item
+        if info is None:
+            # section header
+            col = (P_GREEN if "GAINER" in sym else
+                   P_RED   if "LOSER"  in sym else
+                   P_AMBER if "LOAD"   in sym else P_MID)
+            put(win, y, 2, f" {sym} ", cp(col, bold=True) | curses.A_BOLD)
+            y += 1
+            continue
+
+        sel = (ECS.cursor == row_idx)
+        cursor_map[row_idx] = (sym, info)
+
+        # pick currency symbol from symbol name
+        if "=X" in sym.upper():
+            csym = ""   # forex pairs are ratios
+        elif "-USD" in sym.upper() or screen == 0:
+            csym = "$"
+        else:
+            csym = "$"
+
+        _draw_stock_row(win, y, W, sym, info, csym, sel, cursor_col=P_PINK if screen==0 else P_CYAN)
+
+        # Show home currency equivalent on the right if different
+        if sel and home_cur != "USD" and info:
+            rate = get_currency_rate("USD", home_cur)
+            if rate:
+                eq = info["price"] * rate
+                eq_s = f"≈ {home_sym}{eq:,.2f}"
+                put(win, y, W - len(eq_s) - 2, eq_s, cp(P_CYAN))
+
+        y += 1
+        row_idx += 1
+
+    # Scroll bar
+    if n > H - 10:
+        pct = int(ECS.cursor / max(1, n-1) * (H - 10))
+        for sy in range(7, H - 2):
+            put(win, sy, W - 1, "│", cp(P_BOX))
+        put(win, min(7 + pct, H - 3), W - 1, "█", cp(P_DIM))
+
+    # Bottom panel
+    put(win, H-2, 0, "─" * W, cp(P_BOX))
+    blink = "█" if int(time.time()*2)%2 else " "
+    if ECS.input_mode:
+        put(win, H-1, 0,
+            f" Add symbol: {ECS.input_buf.upper()}{blink}  "
+            "  (ENTER confirm  ESC cancel)  "
+            "e.g. BTC-USD  ETH-USD  SPY  EURUSD=X  GC=F",
+            cp(P_AMBER, bold=True))
+    elif ECS.msg and time.time() - ECS.msg_time < 4:
+        col = P_GREEN if any(w in ECS.msg for w in ("Added","Removed")) else P_RED
+        put(win, H-1, 0, f" {ECS.msg} "[:W], cp(col, bold=True))
+    elif 0 <= ECS.cursor < len(cursor_map):
+        sym, info = cursor_map.get(ECS.cursor, (None, None))
+        if info:
+            pct = info["pct"]
+            pc  = P_GREEN if pct > 0 else (P_RED if pct < 0 else P_MID)
+            put(win, H-1, 0,
+                f" ▶  {sym}  {info['name'][:28]}  {pct:+.2f}%  "
+                "  [a] add  [d] remove  [r] refresh  [q] quit",
+                cp(pc, bold=True))
+        else:
+            put(win, H-1, 0,
+                " [j/k/scroll] navigate  [a] add symbol  [d] remove  [r] refresh  [q] quit ",
+                cp(P_DIM))
+    else:
+        put(win, H-1, 0,
+            " [j/k/scroll] navigate  [a] add symbol  [d] remove  [r] refresh  [q] quit ",
+            cp(P_DIM))
+
+
+def _handle_etf_crypto_key(k):
+    global _etf_last, _crypto_last
+    flat = _build_ec_flat_list()
+    n    = len(flat)
+
+    # Sub-tab switching
+    if k == ord('1') or k == ord('c'): ECS.screen = 0; ECS.cursor = 0; return
+    if k == ord('2') or k == ord('e'): ECS.screen = 1; ECS.cursor = 0; return
+    if k == ord('3') or k == ord('f'): ECS.screen = 2; ECS.cursor = 0; return
+    if k == ord('4') or k == ord('o'): ECS.screen = 3; ECS.cursor = 0; return
+
+    if ECS.input_mode:
+        if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
+            ECS.input_buf = ECS.input_buf[:-1]
+        elif k == 27:
+            ECS.input_mode = False; ECS.input_buf = ""
+        elif k in (10, 13):
+            sym = ECS.input_buf.upper().strip()
+            ECS.input_mode = False; ECS.input_buf = ""
+            if sym and sym not in [s.upper() for s in ECS.custom]:
+                ECS.custom.append(sym)
+                _save_ec_custom()
+                threading.Thread(target=lambda s=sym: _fetch_and_cache_ec(s), daemon=True).start()
+                ECS.msg = f"Added {sym}"; ECS.msg_time = time.time()
+            elif sym:
+                ECS.msg = f"{sym} already added"; ECS.msg_time = time.time()
+        elif 32 <= k <= 126 and len(ECS.input_buf) < 14:
+            ECS.input_buf += chr(k)
+        return
+
+    if k in (ord('j'), curses.KEY_DOWN):
+        ECS.cursor = min(max(0, n-1), ECS.cursor + 1)
+    elif k in (ord('k'), curses.KEY_UP):
+        ECS.cursor = max(0, ECS.cursor - 1)
+    elif k == ord('a'):
+        ECS.input_mode = True; ECS.input_buf = ""
+    elif k == ord('d'):
+        if ECS.custom:
+            # remove the custom symbol nearest cursor
+            if ECS.cursor < len(ECS.custom):
+                removed = ECS.custom.pop(ECS.cursor)
+                _save_ec_custom()
+                ECS.cursor = max(0, ECS.cursor - 1)
+                ECS.msg = f"Removed {removed}"; ECS.msg_time = time.time()
+    elif k == ord('r'):
+        _etf_last = 0.0; _crypto_last = 0.0
+        threading.Thread(target=fetch_etf_bg,    daemon=True).start()
+        threading.Thread(target=fetch_crypto_bg, daemon=True).start()
+        ECS.msg = "Refreshing…"; ECS.msg_time = time.time()
+
+
+def _fetch_and_cache_ec(sym):
+    """Fetch a single custom symbol and store it in both etf and crypto caches."""
+    result = _fetch_stock_price(sym)
+    if result:
+        with _ETF_LOCK:
+            _etf_data[sym.upper()] = result
+        with _CRYPTO_LOCK:
+            _crypto_data[sym.upper()] = result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  DASHBOARD — inject news/stocks widget
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 VIEW_FNS = [v_dashboard, v_clock, v_focus, v_neofetch, v_network,
-            v_library, v_calendar, v_video, v_news_stocks]
+            v_library, v_calendar, v_video, v_news_stocks, v_etf_crypto]
 
 def _in_text_input_mode():
     v = ST.view
@@ -4717,6 +5755,7 @@ def _in_text_input_mode():
     if v == 8 and NSS.stock_input:                               return True
     if v == 8 and NSS.country_mode:                              return True
     if v == 8 and not get_user_country():                        return True  # first-run picker
+    if v == 9 and ECS.input_mode:                                  return True
     return False
 
 
@@ -4728,6 +5767,11 @@ def main(stdscr):
     stdscr.timeout(50)
     stdscr.keypad(True)
     init_colors()
+    # Enable mouse: clicks + scroll wheel
+    # ALL_MOUSE_EVENTS gives clicks + scroll. REPORT_MOUSE_POSITION is intentionally
+    # omitted — it floods getch() with motion events on every pixel move.
+    curses.mousemask(curses.ALL_MOUSE_EVENTS)
+    curses.mouseinterval(0)
 
     if not AUDIO._backend:
         AUDIO.playing = False
@@ -4750,7 +5794,7 @@ def main(stdscr):
         stdscr.refresh()
 
         in_text = _in_text_input_mode()
-        max_keys = 256 if in_text else 8
+        max_keys = 256 if in_text else 32  # enough for mouse events per frame
         for _ in range(max_keys):
             k = stdscr.getch()
             if k == -1:
