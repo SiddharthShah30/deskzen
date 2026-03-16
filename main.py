@@ -3774,6 +3774,15 @@ def handle_key(k):
         return
     v = ST.view
 
+    # Check if ANY input mode is active - if so, ONLY handle input-specific keys
+    # This prevents shortcuts from interfering with text input
+    input_mode_active = (ST.todo_add or 
+                         (v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode)) or 
+                         (v == 5 and LS.mode in ("add_url", "add_file")) or 
+                         (v == 7 and VS.mode in ("add_url", "add_file")) or 
+                         (v == 8 and NSS.stock_input) or
+                         ECS.input_mode)
+
     if ST.todo_add:
         if k in (10, 13):
             t = ST.todo_buf.strip()
@@ -3832,125 +3841,177 @@ def handle_key(k):
             VS.buf += chr(k)
         return
 
-    if k in (curses.KEY_RIGHT, ord('l'), 9):
-        ST.view = (v + 1) % len(VIEWS); return
-    if k in (curses.KEY_LEFT, ord('h')):
-        ST.view = (v - 1) % len(VIEWS); return
+    # Crypto/ETF ticker input - protect it completely
+    if ECS.input_mode:
+        if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
+            ECS.input_buf = ECS.input_buf[:-1]
+        elif k == 27:
+            ECS.input_mode = False; ECS.input_buf = ""
+        elif k in (10, 13):
+            sym = ECS.input_buf.upper().strip()
+            ECS.input_mode = False; ECS.input_buf = ""
+            if sym and sym not in [s.upper() for s in ECS.custom]:
+                ECS.custom.append(sym)
+                _save_ec_custom()
+                threading.Thread(target=lambda s=sym: _fetch_and_cache_ec(s), daemon=True).start()
+                ECS.msg = f"Added {sym}"; ECS.msg_time = time.time()
+            elif sym:
+                ECS.msg = f"{sym} already added"; ECS.msg_time = time.time()
+        elif 32 <= k <= 126 and len(ECS.input_buf) < 14:
+            ECS.input_buf += chr(k)
+        return
 
-    if k == ord(' ') and v != 0: AUDIO.toggle_play(); return
-    if k == ord('z'):             AUDIO.prev_track();  return
-    if k == ord('x'):             AUDIO.next_track();  return
-    if k == ord('s') and v != 2: AUDIO.shuffle = not AUDIO.shuffle; return
-    if k == ord('R'):             AUDIO.repeat = not AUDIO.repeat;   return
-
-    if v == 0:
-        if k in (curses.KEY_UP,   ord('k')): ST.todo_cur = max(0, ST.todo_cur - 1)
-        elif k in (curses.KEY_DOWN, ord('j')): ST.todo_cur = min(len(ST.todos)-1, ST.todo_cur+1)
-        elif k in (10, 13) and ST.todos:
-            ST.todos[ST.todo_cur][0] ^= True
-            save_todos(ST.todos)
-        elif k == ord(' '):  AUDIO.toggle_play()
-        elif k == ord('a'): ST.todo_add = True; ST.todo_buf = ""
-        elif k == ord('d') and ST.todos:
-            ST.todos.pop(ST.todo_cur)
-            ST.todo_cur = max(0, min(ST.todo_cur, len(ST.todos)-1))
-            save_todos(ST.todos)
-        elif k == ord('p'): ST.pomo_run = not ST.pomo_run; ST._pw = time.time()
-        elif k == ord('r'): ST.pomo_run = False; ST.pomo_secs = ST.pomo_total; ST._pw = time.time()
-
-    elif v == 2:
-        if k == ord('p'):   ST.pomo_run = not ST.pomo_run; ST._pw = time.time()
-        elif k == ord('r'): ST.pomo_run = False; ST.pomo_secs = ST.pomo_total; ST._pw = time.time()
-        elif k == ord('s'):
-            ST.pomo_run   = False
-            ST.pomo_phase = "BREAK" if ST.pomo_phase == "WORK" else "WORK"
-            ST.pomo_total = 5*60.0 if ST.pomo_phase == "BREAK" else 25*60.0
-            ST.pomo_secs  = ST.pomo_total; ST._pw = time.time()
-        elif k == ord('f'): ST.focus_idx = (ST.focus_idx+1) % len(ST.focus_modes)
-
-    elif v == 5:
-        if LS.mode == "browse":
-            if k in (curses.KEY_UP,   ord('k')): LS.cursor = max(0, LS.cursor-1)
-            elif k in (curses.KEY_DOWN, ord('j')): LS.cursor = min(len(AUDIO.library)-1, LS.cursor+1)
-            elif k in (10, 13): AUDIO.play_index(LS.cursor)
-            elif k == ord('Y'): LS.mode = "add_url";  LS.buf = ""
-            elif k == ord('F'): LS.mode = "add_file"; LS.buf = ""
-            elif k == ord('D'):
-                if LS.cursor >= len(BUILTIN_TRACKS):
-                    LS.mode = "confirm_del"
+    # Portfolio stock ticker input - protect it completely
+    if v == 8 and NSS.stock_input:
+        if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
+            NSS.stock_buf = NSS.stock_buf[:-1]
+        elif k == 27:
+            NSS.stock_input = False
+            NSS.stock_buf = ""
+        elif k in (10, 13):
+            sym = NSS.stock_buf.upper().strip()
+            NSS.stock_input = False
+            NSS.stock_buf = ""
+            if sym:
+                wl = load_stock_watchlist()
+                if sym not in [s.upper() for s in wl]:
+                    wl.append(sym)
+                    save_stock_watchlist(wl)
+                    threading.Thread(target=lambda s=sym: fetch_stocks_bg([s]), daemon=True).start()
+                    NSS.msg = f"Added {sym} — fetching…"
+                    NSS.msg_time = time.time()
                 else:
-                    LS.msg = "Cannot remove built-in tracks"; LS.msg_time = time.time()
-        elif LS.mode == "confirm_del":
-            if k in (ord('y'), ord('Y')):
-                ok, msg = AUDIO.remove_track(LS.cursor)
-                LS.msg = msg; LS.msg_time = time.time()
-                LS.cursor = max(0, min(LS.cursor, len(AUDIO.library)-1))
-                LS.mode   = "browse"
-            elif k in (ord('n'), ord('N'), 27):
-                LS.mode = "browse"
+                    NSS.msg = f"{sym} already in portfolio"
+                    NSS.msg_time = time.time()
+        elif 32 <= k <= 126 and len(NSS.stock_buf) < 12:
+            NSS.stock_buf += chr(k)
+        return
 
-    elif v == 6:
-        if k == ord('1'):   CS.mode = "day"
-        elif k == ord('2'): CS.mode = "week"
-        elif k == ord('3'): CS.mode = "month"
-        elif k == ord('4'): CS.mode = "year"
-        elif k in (ord('j'), curses.KEY_DOWN):
-            if CS.mode == "day":
+    # Navigation shortcuts (only when NOT in input mode)
+    if not input_mode_active:
+        if k in (curses.KEY_RIGHT, ord('l'), ord('L'), 9):
+            ST.view = (v + 1) % len(VIEWS); return
+        if k in (curses.KEY_LEFT, ord('h'), ord('H')):
+            ST.view = (v - 1) % len(VIEWS); return
+
+    # Global shortcuts (only when NOT in input mode)
+    if not input_mode_active:
+        if k == ord(' ') and v != 0: AUDIO.toggle_play(); return
+        if k in (ord('z'), ord('Z')):             AUDIO.prev_track();  return
+        if k in (ord('x'), ord('X')):             AUDIO.next_track();  return
+        if k in (ord('s'), ord('S')) and v != 2: AUDIO.shuffle = not AUDIO.shuffle; return
+        if k == ord('R'):             AUDIO.repeat = not AUDIO.repeat;   return
+
+    # Skip view-specific shortcuts if in input mode
+    if not input_mode_active:
+        if v == 0:
+            if k in (curses.KEY_UP,   ord('k')): ST.todo_cur = max(0, ST.todo_cur - 1)
+            elif k in (curses.KEY_DOWN, ord('j')): ST.todo_cur = min(len(ST.todos)-1, ST.todo_cur+1)
+            elif k in (10, 13) and ST.todos:
+                ST.todos[ST.todo_cur][0] ^= True
+                save_todos(ST.todos)
+            elif k == ord(' '):  AUDIO.toggle_play()
+            elif k == ord('a'): ST.todo_add = True; ST.todo_buf = ""
+            elif k == ord('d') and ST.todos:
+                ST.todos.pop(ST.todo_cur)
+                ST.todo_cur = max(0, min(ST.todo_cur, len(ST.todos)-1))
+                save_todos(ST.todos)
+            elif k == ord('p'): ST.pomo_run = not ST.pomo_run; ST._pw = time.time()
+            elif k == ord('r'): ST.pomo_run = False; ST.pomo_secs = ST.pomo_total; ST._pw = time.time()
+
+        elif v == 2:
+            if k == ord('p'):   ST.pomo_run = not ST.pomo_run; ST._pw = time.time()
+            elif k == ord('r'): ST.pomo_run = False; ST.pomo_secs = ST.pomo_total; ST._pw = time.time()
+            elif k == ord('s'):
+                ST.pomo_run   = False
+                ST.pomo_phase = "BREAK" if ST.pomo_phase == "WORK" else "WORK"
+                ST.pomo_total = 5*60.0 if ST.pomo_phase == "BREAK" else 25*60.0
+                ST.pomo_secs  = ST.pomo_total; ST._pw = time.time()
+            elif k == ord('f'): ST.focus_idx = (ST.focus_idx+1) % len(ST.focus_modes)
+
+        elif v == 5:
+            if LS.mode == "browse":
+                if k in (curses.KEY_UP,   ord('k')): LS.cursor = max(0, LS.cursor-1)
+                elif k in (curses.KEY_DOWN, ord('j')): LS.cursor = min(len(AUDIO.library)-1, LS.cursor+1)
+                elif k in (10, 13): AUDIO.play_index(LS.cursor)
+                elif k == ord('Y'): LS.mode = "add_url";  LS.buf = ""
+                elif k == ord('F'): LS.mode = "add_file"; LS.buf = ""
+                elif k == ord('D'):
+                    if LS.cursor >= len(BUILTIN_TRACKS):
+                        LS.mode = "confirm_del"
+                    else:
+                        LS.msg = "Cannot remove built-in tracks"; LS.msg_time = time.time()
+            elif LS.mode == "confirm_del":
+                if k in (ord('y'), ord('Y')):
+                    ok, msg = AUDIO.remove_track(LS.cursor)
+                    LS.msg = msg; LS.msg_time = time.time()
+                    LS.cursor = max(0, min(LS.cursor, len(AUDIO.library)-1))
+                    LS.mode   = "browse"
+                elif k in (ord('n'), ord('N'), 27):
+                    LS.mode = "browse"
+
+        elif v == 6:
+            if k == ord('1'):   CS.mode = "day"
+            elif k == ord('2'): CS.mode = "week"
+            elif k == ord('3'): CS.mode = "month"
+            elif k == ord('4'): CS.mode = "year"
+            elif k in (ord('j'), curses.KEY_DOWN):
+                if CS.mode == "day":
+                    evs = _evs_for_day(CS.date)
+                    if evs: CS.cur_ev = (CS.cur_ev + 1) % len(evs)
+                    else:   CS.date += datetime.timedelta(days=1)
+                elif CS.mode == "week":
+                    CS.date += datetime.timedelta(days=7)
+                elif CS.mode == "month":
+                    CS.date += datetime.timedelta(days=28)
+                elif CS.mode == "year":
+                    CS.date = CS.date.replace(year=CS.date.year + 1)
+            elif k in (ord('k'), curses.KEY_UP):
+                if CS.mode == "day":
+                    evs = _evs_for_day(CS.date)
+                    if evs: CS.cur_ev = (CS.cur_ev - 1) % len(evs)
+                    else:   CS.date -= datetime.timedelta(days=1)
+                elif CS.mode == "week":
+                    CS.date -= datetime.timedelta(days=7)
+                elif CS.mode == "month":
+                    CS.date -= datetime.timedelta(days=28)
+                elif CS.mode == "year":
+                    CS.date = CS.date.replace(year=CS.date.year - 1)
+            elif k in (curses.KEY_RIGHT, curses.KEY_LEFT) and CS.mode != "day":
+                CS.date += datetime.timedelta(days=1 if k==curses.KEY_RIGHT else -1)
+            elif k == ord('t'):
+                CS.date = datetime.datetime.now().date(); CS.cur_ev = 0
+            elif k == ord('a'):
+                CS.add_mode = True; CS.add_step = 0
+                CS.add_date = CS.date; CS.add_hour = 9
+                CS.add_min  = 0;       CS.add_title = ""
+            elif k == ord('d'):
                 evs = _evs_for_day(CS.date)
-                if evs: CS.cur_ev = (CS.cur_ev + 1) % len(evs)
-                else:   CS.date += datetime.timedelta(days=1)
-            elif CS.mode == "week":
-                CS.date += datetime.timedelta(days=7)
-            elif CS.mode == "month":
-                CS.date += datetime.timedelta(days=28)
-            elif CS.mode == "year":
-                CS.date = CS.date.replace(year=CS.date.year + 1)
-        elif k in (ord('k'), curses.KEY_UP):
-            if CS.mode == "day":
-                evs = _evs_for_day(CS.date)
-                if evs: CS.cur_ev = (CS.cur_ev - 1) % len(evs)
-                else:   CS.date -= datetime.timedelta(days=1)
-            elif CS.mode == "week":
-                CS.date -= datetime.timedelta(days=7)
-            elif CS.mode == "month":
-                CS.date -= datetime.timedelta(days=28)
-            elif CS.mode == "year":
-                CS.date = CS.date.replace(year=CS.date.year - 1)
-        elif k in (curses.KEY_RIGHT, curses.KEY_LEFT) and CS.mode != "day":
-            CS.date += datetime.timedelta(days=1 if k==curses.KEY_RIGHT else -1)
-        elif k == ord('t'):
-            CS.date = datetime.datetime.now().date(); CS.cur_ev = 0
-        elif k == ord('a'):
-            CS.add_mode = True; CS.add_step = 0
-            CS.add_date = CS.date; CS.add_hour = 9
-            CS.add_min  = 0;       CS.add_title = ""
-        elif k == ord('d'):
-            evs = _evs_for_day(CS.date)
-            if evs and 0 <= CS.cur_ev < len(evs):
-                s, e, t = evs[CS.cur_ev]
-                for li, lev in enumerate(CS.local_evs):
-                    if (lev.get("title") == t and
-                            lev.get("dt","").startswith(s.strftime("%Y-%m-%d"))):
-                        CS.del_idx = li; CS.del_mode = True; break
-                else:
-                    CS.msg = "ICS events cannot be deleted here"; CS.msg_time = time.time()
-        elif k == ord('G'):
-            CS.ics_mode = True; CS.ics_buf = ""
-        elif k == ord('r'):
-            threading.Thread(target=refresh_calendar, daemon=True).start()
-            CS.msg = "Refreshing..."; CS.msg_time = time.time()
+                if evs and 0 <= CS.cur_ev < len(evs):
+                    s, e, t = evs[CS.cur_ev]
+                    for li, lev in enumerate(CS.local_evs):
+                        if (lev.get("title") == t and
+                                lev.get("dt","").startswith(s.strftime("%Y-%m-%d"))):
+                            CS.del_idx = li; CS.del_mode = True; break
+                    else:
+                        CS.msg = "ICS events cannot be deleted here"; CS.msg_time = time.time()
+            elif k == ord('G'):
+                CS.ics_mode = True; CS.ics_buf = ""
+            elif k == ord('r'):
+                threading.Thread(target=refresh_calendar, daemon=True).start()
+                CS.msg = "Refreshing..."; CS.msg_time = time.time()
 
-    elif v == 7:
-        if k == ord('Y'):   VS.mode = "add_url";  VS.buf = ""
-        elif k == ord('O'): VS.mode = "add_file"; VS.buf = ""
-        elif k == ord('S'):
-            VIDEO.stop()
-            VS.msg = "stopped"; VS.msg_time = time.time()
+        elif v == 7:
+            if k == ord('Y'):   VS.mode = "add_url";  VS.buf = ""
+            elif k == ord('O'): VS.mode = "add_file"; VS.buf = ""
+            elif k == ord('S'):
+                VIDEO.stop()
+                VS.msg = "stopped"; VS.msg_time = time.time()
 
-    elif v == 8:
-        _handle_news_stocks_key(k)
-    elif v == 9:
-        _handle_etf_crypto_key(k)
+        elif v == 8:
+            _handle_news_stocks_key(k)
+        elif v == 9:
+            _handle_etf_crypto_key(k)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4483,24 +4544,47 @@ def get_news_items():
 
 
 def _fetch_stock_price(symbol):
-    """Fetch stock price via Yahoo Finance unofficial JSON endpoint."""
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=2d"
-        req = _ureq.Request(url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-        })
-        with _ureq.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode())
-        meta   = data["chart"]["result"][0]["meta"]
-        price  = float(meta.get("regularMarketPrice") or meta.get("previousClose") or 0)
-        prev   = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
-        change = price - prev
-        pct    = (change / prev * 100) if prev else 0.0
-        name   = meta.get("longName") or meta.get("shortName") or symbol
-        return {"price": price, "change": change, "pct": pct, "name": name[:28]}
-    except Exception:
-        return None
+    """Fetch stock price via Yahoo Finance unofficial JSON endpoint.
+    Returns dict with price data, or None if failed.
+    Automatically tries common exchange suffixes for ambiguous symbols.
+    """
+    # Attempt 1: Try the symbol as-is
+    def _try_fetch(sym):
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=2d"
+            req = _ureq.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+            })
+            with _ureq.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            if not data.get("chart") or not data["chart"].get("result"):
+                return None
+            meta   = data["chart"]["result"][0]["meta"]
+            if meta.get("regularMarketPrice") is None and meta.get("previousClose") is None:
+                return None
+            price  = float(meta.get("regularMarketPrice") or meta.get("previousClose") or 0)
+            prev   = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
+            change = price - prev
+            pct    = (change / prev * 100) if prev else 0.0
+            name   = meta.get("longName") or meta.get("shortName") or sym
+            return {"price": price, "change": change, "pct": pct, "name": name[:28]}
+        except Exception:
+            return None
+    
+    # Try original symbol
+    result = _try_fetch(symbol)
+    if result:
+        return result
+    
+    # If symbol has no dot, try common Indian exchange suffixes
+    if "." not in symbol:
+        for suffix in [".NS", ".BO", ".NU"]:
+            result = _try_fetch(symbol + suffix)
+            if result:
+                return result
+    
+    return None
 
 
 def fetch_stocks_bg(symbols):
@@ -4508,10 +4592,13 @@ def fetch_stocks_bg(symbols):
     global _stock_data, _stocks_status, _stocks_last
     _stocks_status = "Fetching prices…"
     new_data = {}
+    failed = []
     for sym in symbols:
         result = _fetch_stock_price(sym.upper())
         if result:
             new_data[sym.upper()] = result
+        else:
+            failed.append(sym.upper())
     if new_data:
         with _STOCKS_LOCK:
             _stock_data.update(new_data)
@@ -4523,9 +4610,15 @@ def fetch_stocks_bg(symbols):
                 json.dump(combined, f, indent=2)
         except Exception:
             pass
-        _stocks_status = f"Updated  {datetime.datetime.now().strftime('%H:%M')}"
+        if failed:
+            _stocks_status = f"Updated {len(new_data)} — {len(failed)} invalid"
+        else:
+            _stocks_status = f"Updated  {datetime.datetime.now().strftime('%H:%M')}"
     else:
-        _stocks_status = "No data (check internet)"
+        if symbols:
+            _stocks_status = f"Failed: Invalid symbol(s). Try with exchange suffix (e.g., OLECTRA.NS)"
+        else:
+            _stocks_status = "No data (check internet)"
     _stocks_last = time.time()
 
 
@@ -5681,12 +5774,7 @@ def _handle_etf_crypto_key(k):
     flat = _build_ec_flat_list()
     n    = len(flat)
 
-    # Sub-tab switching
-    if k == ord('1') or k == ord('c'): ECS.screen = 0; ECS.cursor = 0; return
-    if k == ord('2') or k == ord('e'): ECS.screen = 1; ECS.cursor = 0; return
-    if k == ord('3') or k == ord('f'): ECS.screen = 2; ECS.cursor = 0; return
-    if k == ord('4') or k == ord('o'): ECS.screen = 3; ECS.cursor = 0; return
-
+    # Handle input mode first - check for input before any shortcuts
     if ECS.input_mode:
         if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
             ECS.input_buf = ECS.input_buf[:-1]
@@ -5705,6 +5793,12 @@ def _handle_etf_crypto_key(k):
         elif 32 <= k <= 126 and len(ECS.input_buf) < 14:
             ECS.input_buf += chr(k)
         return
+
+    # Sub-tab switching (only when NOT in input mode)
+    if k == ord('1') or k == ord('c'): ECS.screen = 0; ECS.cursor = 0; return
+    if k == ord('2') or k == ord('e'): ECS.screen = 1; ECS.cursor = 0; return
+    if k == ord('3') or k == ord('f'): ECS.screen = 2; ECS.cursor = 0; return
+    if k == ord('4') or k == ord('o'): ECS.screen = 3; ECS.cursor = 0; return
 
     if k in (ord('j'), curses.KEY_DOWN):
         ECS.cursor = min(max(0, n-1), ECS.cursor + 1)
