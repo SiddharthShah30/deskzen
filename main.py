@@ -18,7 +18,7 @@ if platform.system() == "Windows":
 else:
     import curses
 
-import time, threading, socket, os, datetime, random, json, math, struct, shutil
+import time, threading, socket, os, datetime, random, json, math, struct, shutil, atexit, hashlib
 
 try:
     import psutil
@@ -236,6 +236,8 @@ LIBRARY_FILE = os.path.join(os.path.expanduser("~"), ".terminal_standby_music.js
 # ══════════════════════════════════════════════════════════════════════════════
 CAL_FILE  = os.path.join(os.path.expanduser("~"), ".terminal_standby_cal.json")
 CAL_ICS   = os.path.join(os.path.expanduser("~"), ".terminal_standby.ics")
+CAL_ICS_DIR = os.path.join(os.path.expanduser("~"), ".terminal_standby_ics")
+CAL_SRC_FILE = os.path.join(os.path.expanduser("~"), ".terminal_standby_cal_sources.json")
 _CAL_LOCK = threading.Lock()
 _CAL_EVENTS = []
 _CAL_STATUS = ""
@@ -281,7 +283,106 @@ def _parse_ics(text):
     return sorted(events, key=lambda e: e[0])
 
 
+def _source_id(src):
+    return hashlib.sha1(src.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _label_for_source(src):
+    s = src.strip()
+    if s.lower().startswith(("http://", "https://")):
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(s)
+            host = p.netloc or "ical"
+            tail = (p.path.rsplit("/", 1)[-1] or "feed.ics")[:24]
+            return f"{host}/{tail}"[:42]
+        except Exception:
+            return s[:42]
+    return os.path.basename(s)[:42] or s[:42]
+
+
+def _load_ics_sources():
+    try:
+        with open(CAL_SRC_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            clean = []
+            for it in data:
+                if not isinstance(it, dict):
+                    continue
+                src = str(it.get("source", "")).strip()
+                sid = str(it.get("id", _source_id(src))).strip()
+                if not src:
+                    continue
+                path = it.get("path") or os.path.join(CAL_ICS_DIR, f"{sid}.ics")
+                clean.append({
+                    "id": sid,
+                    "source": src,
+                    "label": it.get("label") or _label_for_source(src),
+                    "path": path,
+                })
+            return clean
+    except Exception:
+        pass
+    return []
+
+
+def _save_ics_sources(srcs):
+    try:
+        with open(CAL_SRC_FILE, "w", encoding="utf-8") as f:
+            json.dump(srcs, f, indent=2)
+    except Exception:
+        pass
+
+
+def _ensure_ics_sources_migrated():
+    os.makedirs(CAL_ICS_DIR, exist_ok=True)
+    if os.path.exists(CAL_SRC_FILE):
+        return _load_ics_sources()
+    srcs = _load_ics_sources()
+    if srcs:
+        return srcs
+    try:
+        if os.path.exists(CAL_ICS) and os.path.getsize(CAL_ICS) > 0:
+            sid = "legacy"
+            target = os.path.join(CAL_ICS_DIR, f"{sid}.ics")
+            try:
+                shutil.copyfile(CAL_ICS, target)
+            except Exception:
+                target = CAL_ICS
+            srcs = [{
+                "id": sid,
+                "source": CAL_ICS,
+                "label": "Legacy iCal",
+                "path": target,
+            }]
+            _save_ics_sources(srcs)
+    except Exception:
+        pass
+    return srcs
+
+
+def _read_ics_source(source):
+    s = source.strip()
+    if s.lower().startswith(("http://", "https://")):
+        import urllib.request
+        req = urllib.request.Request(s, headers={"User-Agent": "TerminalStandBy/3"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    with open(s, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def get_connected_ics_sources():
+    return _ensure_ics_sources_migrated()
+
+
+def get_connected_ics_count():
+    return len(get_connected_ics_sources())
+
+
 def load_calendar_events():
+    _ensure_ics_sources_migrated()
     evs = []
     try:
         with open(CAL_FILE) as f:
@@ -293,10 +394,15 @@ def load_calendar_events():
                     except: dt = None
                 if dt: evs.append((dt, dt, e.get("title","Event")[:50]))
     except Exception: pass
-    try:
-        with open(CAL_ICS, encoding="utf-8", errors="replace") as f:
-            evs += _parse_ics(f.read())
-    except Exception: pass
+    for src in _load_ics_sources():
+        p = src.get("path", "")
+        if not p or not os.path.exists(p):
+            continue
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                evs += _parse_ics(f.read())
+        except Exception:
+            pass
     return sorted(set(evs), key=lambda e: e[0])
 
 
@@ -315,37 +421,142 @@ def refresh_calendar():
     _CAL_STATUS = f"Loaded {len(evs)} events"
 
 
-def fetch_ics_url(url):
+def fetch_ics_url(url, label=None):
     global _CAL_STATUS
     try:
-        import urllib.request
         _CAL_STATUS = "Fetching calendar..."
-        req = urllib.request.Request(url, headers={"User-Agent": "TerminalStandBy/3"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = resp.read().decode("utf-8", errors="replace")
+        source = url.strip()
+        data = _read_ics_source(source)
         if "BEGIN:VCALENDAR" not in data:
             _CAL_STATUS = "ERROR: Not a valid ICS file"
             return False, "Not a valid ICS"
-        with open(CAL_ICS, "w", encoding="utf-8") as f:
+        os.makedirs(CAL_ICS_DIR, exist_ok=True)
+        srcs = _ensure_ics_sources_migrated()
+        sid = _source_id(source)
+        out = os.path.join(CAL_ICS_DIR, f"{sid}.ics")
+        with open(out, "w", encoding="utf-8") as f:
             f.write(data)
+        custom_label = (label or "").strip()
+        updated = False
+        for s in srcs:
+            if s.get("id") == sid or s.get("source") == source:
+                s["id"] = sid
+                s["source"] = source
+                s["label"] = custom_label or s.get("label") or _label_for_source(source)
+                s["path"] = out
+                updated = True
+                break
+        if not updated:
+            label = custom_label or _label_for_source(source)
+            srcs.append({"id": sid, "source": source, "label": label, "path": out})
+        _save_ics_sources(srcs)
         refresh_calendar()
-        _CAL_STATUS = f"Synced {len(_CAL_EVENTS)} events"
+        _CAL_STATUS = f"Connected {len(srcs)} calendars · Synced {len(_CAL_EVENTS)} events"
         return True, f"Synced {len(_CAL_EVENTS)} events"
     except Exception as e:
         _CAL_STATUS = f"ERROR: {e}"
         return False, str(e)
 
 
+def has_connected_ics():
+    return get_connected_ics_count() > 0
+
+
+def disconnect_ics_calendar(source_idx=None, source_id=None):
+    global _CAL_STATUS
+    try:
+        srcs = _ensure_ics_sources_migrated()
+        if not srcs:
+            _CAL_STATUS = "No connected calendar"
+            return False, _CAL_STATUS
+
+        pick = None
+        if source_id:
+            for s in srcs:
+                if s.get("id") == source_id:
+                    pick = s
+                    break
+        elif source_idx is not None and 0 <= source_idx < len(srcs):
+            pick = srcs[source_idx]
+        else:
+            pick = srcs[0]
+
+        if not pick:
+            _CAL_STATUS = "No matching calendar source"
+            return False, _CAL_STATUS
+
+        new_srcs = [s for s in srcs if s.get("id") != pick.get("id")]
+        _save_ics_sources(new_srcs)
+
+        p = pick.get("path", "")
+        if p and os.path.exists(p):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+        # Remove legacy singleton ICS too, otherwise migration can revive it.
+        if pick.get("id") == "legacy" or pick.get("source") == CAL_ICS:
+            try:
+                if os.path.exists(CAL_ICS):
+                    os.remove(CAL_ICS)
+            except Exception:
+                pass
+
+        refresh_calendar()
+        _CAL_STATUS = f"Disconnected: {pick.get('label', 'calendar')}"
+        return True, _CAL_STATUS
+    except Exception as e:
+        _CAL_STATUS = f"ERROR: {e}"
+        return False, str(e)
+
+
 def get_next_event():
+    def _add_months(dt, months):
+        y = dt.year + (dt.month - 1 + months) // 12
+        m = (dt.month - 1 + months) % 12 + 1
+        import calendar as _c
+        d = min(dt.day, _c.monthrange(y, m)[1])
+        return dt.replace(year=y, month=m, day=d)
+
+    def _fmt_remaining(start, now):
+        if start <= now:
+            return "ongoing"
+
+        months = (start.year - now.year) * 12 + (start.month - now.month)
+        anchor = _add_months(now, months)
+        if anchor > start:
+            months -= 1
+            anchor = _add_months(now, months)
+
+        delta = start - anchor
+        days = delta.days
+        hours = delta.seconds // 3600
+        minutes = (delta.seconds % 3600) // 60
+
+        parts = []
+        if months > 0:
+            parts.append(f"{months}mo")
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0:
+            parts.append(f"{hours}h")
+
+        if not parts:
+            if minutes > 0:
+                parts.append(f"{minutes}m")
+            else:
+                parts.append("<1m")
+
+        return "in " + " ".join(parts)
+
     now = datetime.datetime.now()
     with _CAL_LOCK:
         evs = list(_CAL_EVENTS)
     for start, end, title in evs:
         if start > now:
-            diff = int((start - now).total_seconds())
-            hh, rem = divmod(diff, 3600); mm = rem // 60
             ts = f"{start.strftime('%H:%M')}  {title}"
-            remaining = f"in {hh}h {mm:02d}m" if hh > 0 else f"in {mm}m"
+            remaining = _fmt_remaining(start, now)
             return ts[:40], remaining
     for start, end, title in evs:
         if start.date() == now.date() and start <= now:
@@ -621,11 +832,31 @@ class AudioEngine:
         self._wall      = time.time()
         self._play_gen  = 0
         self._proc      = None
+        self._active_pids = set()
         self.status_msg = ""
         self._spec_t    = 0.0
         self._backend   = self._detect()
         if self._backend != "sounddevice":
             threading.Thread(target=self._try_install_sd, daemon=True).start()
+
+    def _track_proc(self, proc):
+        if not proc:
+            return
+        with self._lock:
+            self._proc = proc
+            try:
+                self._active_pids.add(int(proc.pid))
+            except Exception:
+                pass
+
+    def _untrack_proc(self, proc):
+        with self._lock:
+            if self._proc is proc:
+                self._proc = None
+            try:
+                self._active_pids.discard(int(proc.pid))
+            except Exception:
+                pass
 
     def _try_install_sd(self):
         try:
@@ -821,7 +1052,7 @@ class AudioEngine:
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL)
-            with self._lock: self._proc = proc
+            self._track_proc(proc)
             while self._alive(gen):
                 try:
                     proc.stdin.write(genfn(self.CHUNK, state))
@@ -836,8 +1067,7 @@ class AudioEngine:
             except: pass
             try: proc.wait(timeout=2)
             except: proc.terminate()
-            with self._lock:
-                if self._proc is proc: self._proc = None
+            self._untrack_proc(proc)
 
     def _stream_wav_segments(self, gen, genfn, state):
         import tempfile, wave as wv
@@ -869,7 +1099,7 @@ class AudioEngine:
                     proc = subprocess.Popen(["afplay", tmp.name],
                                             stdout=subprocess.DEVNULL,
                                             stderr=subprocess.DEVNULL)
-                    with self._lock: self._proc = proc
+                    self._track_proc(proc)
                     while proc.poll() is None:
                         if not self._alive(gen): proc.terminate(); return
                         time.sleep(0.05)
@@ -925,12 +1155,11 @@ class AudioEngine:
             proc = subprocess.Popen(cmd,
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL)
-            with self._lock: self._proc = proc
+            self._track_proc(proc)
             while proc.poll() is None:
                 if not self._alive(gen): proc.terminate(); break
                 time.sleep(0.05)
-            with self._lock:
-                if self._proc is proc: self._proc = None
+            self._untrack_proc(proc)
         except Exception:
             pass
 
@@ -981,12 +1210,11 @@ class AudioEngine:
             proc = subprocess.Popen(
                 ["powershell","-NoProfile","-NonInteractive","-Command",script],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            with self._lock: self._proc = proc
+            self._track_proc(proc)
             while proc.poll() is None:
                 if not self._alive(gen): proc.terminate(); break
                 time.sleep(0.1)
-            with self._lock:
-                if self._proc is proc: self._proc = None
+            self._untrack_proc(proc)
         except Exception:
             pass
 
@@ -995,9 +1223,25 @@ class AudioEngine:
         with self._lock:
             proc = self._proc
             self._proc = None
-        if proc:
-            try: proc.terminate()
-            except: pass
+            pids = list(self._active_pids)
+            self._active_pids.clear()
+        if proc and getattr(proc, "pid", None):
+            if int(proc.pid) not in pids:
+                pids.append(int(proc.pid))
+
+        if platform.system() == "Windows":
+            for pid in pids:
+                try:
+                    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                                   capture_output=True, timeout=5)
+                except Exception:
+                    pass
+        else:
+            for pid in pids:
+                try:
+                    os.kill(pid, 15)
+                except Exception:
+                    pass
         if platform.system() == "Windows":
             try:
                 import winsound
@@ -1118,11 +1362,110 @@ class VideoPlayer:
         self.playing     = False
         self.title       = ""
         self.status      = ""
+        self.in_terminal = False
+        self.prefer_ascii = False
+        self.ascii_mode   = False
         self._proc       = None
         self._lock       = threading.Lock()
         self._renderer   = None
         self._installing = False
+        self._tct_checked = False
+        self._tct_supported = False
+        self._ascii_frame = []
+        self._ascii_lock  = threading.Lock()
+        self._ascii_stop  = threading.Event()
+        self._ascii_thread = None
+        self._ascii_cols  = 90
+        self._ascii_rows  = 26
         threading.Thread(target=self._setup, daemon=True).start()
+
+    def set_ascii_viewport(self, cols, rows):
+        with self._ascii_lock:
+            self._ascii_cols = max(24, int(cols))
+            self._ascii_rows = max(8, int(rows))
+
+    def get_ascii_frame(self):
+        with self._ascii_lock:
+            return list(self._ascii_frame)
+
+    def _ascii_available(self):
+        try:
+            import cv2  # noqa: F401
+            return True
+        except Exception:
+            return False
+
+    def _play_ascii(self, source, title=""):
+        if not self._ascii_available():
+            self.status = "ASCII mode needs OpenCV: pip install opencv-python"
+            self.playing = False
+            return False
+
+        self._ascii_stop.clear()
+        self.ascii_mode = True
+        self.title = title or os.path.basename(source)[:40]
+        self.status = f"playing ASCII (no audio) — {self.title}"
+
+        def _runner():
+            try:
+                import cv2
+                chars = " .:-=+*#%@"
+                cap = cv2.VideoCapture(source)
+                if not cap or not cap.isOpened():
+                    self.status = "ASCII: could not open source"
+                    self.playing = False
+                    self.ascii_mode = False
+                    return
+
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                if not fps or fps <= 0 or fps > 120:
+                    fps = 24.0
+                delay = 1.0 / fps
+
+                with self._lock:
+                    self.playing = True
+
+                while not self._ascii_stop.is_set():
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+
+                    with self._ascii_lock:
+                        cols = self._ascii_cols
+                        rows = self._ascii_rows
+
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    target_w = max(24, cols)
+                    target_h = max(8, rows)
+                    small = cv2.resize(gray, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+                    lines = []
+                    for r in small:
+                        line = "".join(chars[min(len(chars)-1, int(px * (len(chars)-1) / 255))] for px in r)
+                        lines.append(line)
+
+                    with self._ascii_lock:
+                        self._ascii_frame = lines
+
+                    time.sleep(delay)
+
+                cap.release()
+                if self._ascii_stop.is_set():
+                    self.status = "stopped"
+                else:
+                    self.status = f"finished — {self.title}"
+            except Exception as e:
+                self.status = f"ASCII error: {str(e)[:50]}"
+            finally:
+                with self._lock:
+                    self.playing = False
+                self.ascii_mode = False
+                with self._ascii_lock:
+                    self._ascii_frame = []
+
+        self._ascii_thread = threading.Thread(target=_runner, daemon=True)
+        self._ascii_thread.start()
+        return True
 
     def _setup(self):
         r = self._find_mpv()
@@ -1148,6 +1491,8 @@ class VideoPlayer:
         if p: return p
         if platform.system() == "Windows":
             for candidate in [
+                r"C:\Program Files\MPV Player\mpv.exe",
+                r"C:\Program Files (x86)\MPV Player\mpv.exe",
                 os.path.join(os.environ.get("LOCALAPPDATA",""), "Programs","mpv","mpv.exe"),
                 os.path.join(os.environ.get("LOCALAPPDATA",""), "mpv","mpv.exe"),
                 r"C:\mpv\mpv.exe",
@@ -1157,6 +1502,19 @@ class VideoPlayer:
                 if os.path.isfile(candidate):
                     return candidate
         return None
+
+    def _check_tct_support(self, mpv_path):
+        if self._tct_checked:
+            return self._tct_supported
+        try:
+            r = subprocess.run([mpv_path, "--vo=help"],
+                               capture_output=True, text=True, timeout=5)
+            txt = ((r.stdout or "") + "\n" + (r.stderr or "")).lower()
+            self._tct_supported = "tct" in txt
+        except Exception:
+            self._tct_supported = False
+        self._tct_checked = True
+        return self._tct_supported
 
     def _find_ffplay(self):
         p = shutil.which("ffplay")
@@ -1311,20 +1669,59 @@ class VideoPlayer:
                 self.playing = False
                 return
             try:
+                term_mode = bool(self.in_terminal)
+                # Terminal rendering needs mpv. If we're on ffplay, try to switch.
+                if term_mode and renderer:
+                    base = os.path.basename(renderer).lower()
+                    if "mpv" not in base:
+                        mpv = self._find_mpv()
+                        if mpv:
+                            self._renderer = mpv
+                            renderer = mpv
+                        else:
+                            if not self._installing:
+                                threading.Thread(target=self._auto_install_mpv, daemon=True).start()
+                            self.status = "terminal mode needs mpv; installing/looking for mpv..."
+                            self.playing = False
+                            return
                 is_mpv = "mpv" in os.path.basename(renderer).lower()
                 if is_mpv:
-                    if platform.system() == "Windows":
+                    if term_mode:
+                        if self.prefer_ascii:
+                            if self._play_ascii(source, self.title):
+                                return
+                        if not self._check_tct_support(renderer):
+                            if self._play_ascii(source, self.title):
+                                self.status = f"ASCII fallback (mpv tct unavailable) — {self.title}"
+                                return
+                            self.status = "terminal mode unsupported: mpv build has no vo=tct"
+                            self.playing = False
+                            return
+                        cmd = [renderer, "--no-config", "--vo=tct", "--force-window=no",
+                               "--really-quiet", source]
+                    elif platform.system() == "Windows":
                         cmd = [renderer, "--really-quiet", source]
                     else:
                         cmd = [renderer, "--vo=tct", "--really-quiet", source]
                 else:
+                    if term_mode:
+                        if self._play_ascii(source, self.title):
+                            self.status = f"ASCII fallback (ffplay cannot render in terminal) — {self.title}"
+                            return
+                        self.status = "terminal mode requires mpv (ffplay cannot render in this terminal)"
+                        self.playing = False
+                        return
                     ffplay_path = renderer if os.path.isfile(renderer) else shutil.which(renderer) or renderer
                     cmd = [ffplay_path, "-loglevel", "quiet", "-autoexit", source]
 
                 self.status = f"launching player..."
-                proc = subprocess.Popen(cmd,
-                                        stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL)
+                # In terminal mode we must inherit stdout/stderr so tct frames are visible.
+                if term_mode:
+                    proc = subprocess.Popen(cmd)
+                else:
+                    proc = subprocess.Popen(cmd,
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
                 with self._lock:
                     self._proc   = proc
                     self.playing = True
@@ -1407,14 +1804,48 @@ class VideoPlayer:
         threading.Thread(target=_stream, daemon=True).start()
 
     def stop(self):
+        self._ascii_stop.set()
         with self._lock:
             proc = self._proc
             self._proc   = None
             self.playing = False
         if proc:
-            try: proc.terminate()
-            except: pass
+            try:
+                if platform.system() == "Windows":
+                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                   capture_output=True, timeout=5)
+                else:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except Exception:
+                        proc.kill()
+            except Exception:
+                pass
+        self.ascii_mode = False
+        with self._ascii_lock:
+            self._ascii_frame = []
+        self.title = ""
         self.status = ""
+
+    def toggle_terminal_mode(self):
+        self.in_terminal = not self.in_terminal
+        if self.in_terminal:
+            mpv = self._find_mpv()
+            if mpv:
+                self._renderer = mpv
+                self.status = "terminal mode enabled (mpv)"
+            else:
+                if not self._installing:
+                    threading.Thread(target=self._auto_install_mpv, daemon=True).start()
+                self.status = "terminal mode enabled; searching/installing mpv..."
+        elif self.status.startswith("terminal mode"):
+            self.status = ""
+        return self.in_terminal
+
+    def toggle_ascii_preference(self):
+        self.prefer_ascii = not self.prefer_ascii
+        return self.prefer_ascii
 
     def has_renderer(self): return self._renderer is not None
     def renderer_name(self):
@@ -1424,7 +1855,9 @@ class VideoPlayer:
 
 
 VIDEO = VideoPlayer()
+atexit.register(VIDEO.stop)
 AUDIO = AudioEngine()
+atexit.register(AUDIO._kill)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SYSTEM DATA  –  FIXED VERSION
@@ -2313,11 +2746,13 @@ def draw_spectrum(win, y, x, h, w, spectrum, col_low=P_CYAN, col_mid=P_BLUE, col
 # ══════════════════════════════════════════════════════════════════════════════
 #  APP STATE
 # ══════════════════════════════════════════════════════════════════════════════
-VIEWS = ["DASHBOARD","CLOCK + MUSIC","FOCUS","NEOFETCH","NETWORK","LIBRARY","CALENDAR","VIDEO","NEWS & STOCKS","ETF · CRYPTO"]
+VIEWS = ["DASHBOARD","MUSIC + LIBRARY","FOCUS","NEOFETCH","NETWORK","LIBRARY","CALENDAR","VIDEO","NEWS & MARKET HUB"]
+ALL_VIEW_NAMES = VIEWS + ["NEWS & STOCKS", "ETF · CRYPTO"]
 
 class State:
     def __init__(self):
         self.view       = 0
+        self.return_view = None
         self.todos      = load_todos()
         self.todo_cur   = 0
         self.todo_add   = False
@@ -2378,134 +2813,143 @@ def v_dashboard(win, W, H):
     now = datetime.datetime.now()
     sd  = SD.snap()
 
-    # ── Row 1: Clock (left) + Status (right) ─────────────────────────────────
-    cw = W//2 - 1
-    box(win, 1, 0, 9, cw, "CLOCK")
+    # ── Column setup ──────────────────────────────────────────────────────────
+    lw = W // 2
+    rw = W - lw - 1
+
+    # ── Top row: Clock (left) + Upcoming events (right) ──────────────────────
+    top_h = 9
+    box(win, 1, 0, top_h, lw, "CLOCK")
     ts = now.strftime("%H:%M")
-    big_time(win, 2, max(1,(cw-btw(ts))//2), ts)
+    big_time(win, 2, max(1, (lw - btw(ts)) // 2), ts)
     put(win, 7, 2, now.strftime("%A, %b %d").upper(), cp(P_DIM))
 
-    rx = W//2; rw = W-rx-1
-    box(win, 1, rx, 9, rw, "STATUS")
-    bat=sd["bat_pct"]; plug=sd["bat_plug"]
-    bc = P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
-    bw2 = max(4, rw-15)
-    put(win, 2, rx+2, f"BAT {'+'if plug else ' '}{bat:3d}%", cp(bc,bold=True))
-    hbar(win, 2, rx+12, bw2, bat, bc)
-    put(win, 3, rx+2, f"CPU  {sd['cpu']:5.1f}%", cp(P_CYAN))
-    hbar(win, 3, rx+12, bw2, int(sd["cpu"]), P_CYAN)
-    put(win, 4, rx+2, f"MEM  {sd['mem_pct']:5.1f}%", cp(P_BLUE))
-    hbar(win, 4, rx+12, bw2, int(sd["mem_pct"]), P_BLUE)
-    uh,rem=divmod(sd["uptime"],3600); um=rem//60
-    put(win, 5, rx+2, f"UP   {uh}h {um:02d}m", cp(P_DIM))
-    put(win, 6, rx+2, f"NET  {sd['ssid'][:rw-8]}", cp(P_DIM))
-    put(win, 7, rx+2, f"I/O  ↓{kbfmt(sd['net_dn'])} ↑{kbfmt(sd['net_up'])}", cp(P_DIM))
+    box(win, 1, lw, top_h, rw, "UPCOMING EVENTS")
+    with _CAL_LOCK:
+        evs = list(_CAL_EVENTS)
+    upcoming = []
+    for start, end, title in evs:
+        if end < now:
+            continue
+        if start <= now <= end:
+            when = "NOW"
+        else:
+            when = start.strftime("%a %H:%M")
+        upcoming.append((when, title))
+        if len(upcoming) >= 3:
+            break
+    while len(upcoming) < 3:
+        if len(upcoming) == 0:
+            upcoming.append(("--", "No calendar events"))
+        elif len(upcoming) == 1:
+            upcoming.append(("TIP", "Press → to open Calendar"))
+        else:
+            upcoming.append(("TIP", "Add events to see here"))
+    for i, (when, title) in enumerate(upcoming[:3]):
+        yy = 2 + i * 2
+        put(win, yy, lw + 2, f"{when:>8}", cp(P_CYAN, bold=True))
+        put(win, yy, lw + 12, title[:max(8, rw - 14)], cp(P_HI if i == 0 else P_MID))
 
-    # ── Row 2: TODOS (left) + NEWS & STOCKS (right) — split 50/50 ────────────
-    mid_start = 11
-    # Cap todos at a fixed height to make room; remaining space goes to news
-    # Available rows: from row 11 to (H - 12) for the dual panel
-    dual_avail  = max(6, H - mid_start - 11)   # leave 11 rows at bottom
-    todo_h_max  = max(4, dual_avail // 2 + 1)  # todos gets top ~half
-    news_h_max  = max(4, dual_avail - todo_h_max)
+    # ── Lower area: left = todos/pomodoro/visualizer, right = news/system ────
+    col_y = 11
+    col_h = max(10, H - col_y - 1)
 
-    lw = W // 2        # left column width
-    rw2 = W - lw - 1  # right column width
+    # Left stack sizing
+    pomo_h = 5
+    todo_h = max(6, min(col_h - 7, col_h // 2))
+    vis_box_h = col_h - todo_h - pomo_h - 2
+    if vis_box_h < 4:
+        shrink = 4 - vis_box_h
+        todo_h = max(6, todo_h - shrink)
+        vis_box_h = col_h - todo_h - pomo_h - 2
 
-    # ── TODOS (left) ─────────────────────────────────────────────────────────
-    todo_inner = max(2, todo_h_max - 2)
-    todo_h     = todo_inner + 2 + (1 if ST.todo_add else 0)
-    box(win, mid_start, 0, todo_h, lw,
-        "TODOS  [a]=add  [d]=del  [ENTER]=check")
-    visible_n = todo_inner
-    start = max(0, ST.todo_cur - visible_n + 1) if len(ST.todos) > visible_n else 0
-
-    for i, (done, text) in enumerate(ST.todos[start:start+visible_n]):
-        ri  = start+i
-        ry  = mid_start+1+i
+    # ── TODOS (left/top) ─────────────────────────────────────────────────────
+    todo_inner = max(2, todo_h - 2 - (1 if ST.todo_add else 0))
+    todo_box_h = todo_inner + 2 + (1 if ST.todo_add else 0)
+    box(win, col_y, 0, todo_box_h, lw, "TODOS  [a]=add  [d]=del  [ENTER]=check")
+    start = max(0, ST.todo_cur - todo_inner + 1) if len(ST.todos) > todo_inner else 0
+    for i, (done, text) in enumerate(ST.todos[start:start + todo_inner]):
+        ri = start + i
+        ry = col_y + 1 + i
         sel = (ri == ST.todo_cur)
-        put(win, ry, 1, " "*(lw-2),
-            cp(P_DIM)|(curses.A_REVERSE if sel else 0))
+        put(win, ry, 1, " " * (lw - 2), cp(P_DIM) | (curses.A_REVERSE if sel else 0))
         tick_c = "✓" if done else " "
-        col    = P_DIM if done else (P_AMBER if sel else P_HI)
-        line   = f" {'▶' if sel else ' '} [{tick_c}] {text}"
-        put(win, ry, 1, line[:lw-2],
-            cp(col)|(curses.A_REVERSE if sel else 0))
-    if len(ST.todos) > visible_n:
-        put(win, mid_start+1, lw-8, f"{ST.todo_cur+1}/{len(ST.todos)}", cp(P_DIM))
+        col = P_DIM if done else (P_AMBER if sel else P_HI)
+        line = f" {'▶' if sel else ' '} [{tick_c}] {text}"
+        put(win, ry, 1, line[:lw - 2], cp(col) | (curses.A_REVERSE if sel else 0))
+    if len(ST.todos) > todo_inner:
+        put(win, col_y + 1, lw - 8, f"{ST.todo_cur+1}/{len(ST.todos)}", cp(P_DIM))
     if ST.todo_add:
-        put(win, mid_start+1+visible_n, 2,
+        put(win, col_y + 1 + todo_inner, 2,
             f" + {ST.todo_buf}{'█' if int(time.time()*2)%2 else ' '}", cp(P_AMBER))
 
-    # ── NEWS & STOCKS (right of todos) ───────────────────────────────────────
-    code   = get_user_country() or "GLOBAL"
+    # ── POMODORO (left/middle) ───────────────────────────────────────────────
+    py = col_y + todo_box_h + 1
+    box(win, py, 0, pomo_h, lw, "POMODORO  [p]=start  [r]=reset")
+    pm = int(ST.pomo_secs) // 60
+    ps = int(ST.pomo_secs) % 60
+    pct = int((1 - ST.pomo_secs / max(1, ST.pomo_total)) * 100)
+    pc = P_RED if ST.pomo_phase == "WORK" else P_GREEN
+    sym2 = "▶" if ST.pomo_run else "||"
+    put(win, py + 1, 2, f" {sym2}  {pm:02d}:{ps:02d}  {ST.pomo_phase}", cp(pc, bold=True))
+    hbar(win, py + 2, 2, max(4, lw - 4), pct, pc)
+    dots = " ".join("◉" if i < ST.pomo_done else "○" for i in range(8))
+    put(win, py + 3, 2, dots[:max(1, lw - 4)], cp(P_DIM))
+
+    # ── VISUALIZER (left/bottom) ─────────────────────────────────────────────
+    vy = py + pomo_h + 1
+    if vis_box_h >= 4 and vy + vis_box_h - 1 < H - 1:
+        td = AUDIO.current
+        lbl = f"VISUALIZER  ~ {td['name'][:28]} — {td['artist']}"
+        box(win, vy, 0, vis_box_h, lw, lbl)
+        vis_h = max(2, vis_box_h - 2)
+        draw_spectrum(win, vy + 1, 1, vis_h, max(4, lw - 3), list(ST._spec_smooth))
+
+    # Right stack sizing
+    news_h = max(7, min(col_h - 7, (col_h * 2) // 3))
+    sys_h = col_h - news_h - 1
+    if sys_h < 6:
+        news_h = max(7, news_h - (6 - sys_h))
+        sys_h = col_h - news_h - 1
+
+    # ── NEWS (right/top) ─────────────────────────────────────────────────────
+    code = get_user_country() or "GLOBAL"
     c_info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
-    flag   = c_info["flag"]
-    items  = get_news_items()
-    stocks = get_stock_data()
-    wl     = load_stock_watchlist()
-
-    ns_title = f"NEWS & STOCKS  {flag} [→ view 9]"
-    box(win, mid_start, lw, todo_h, rw2, ns_title)
-
-    # Stock ticker strip (1 line)
-    sx = lw + 2; sy = mid_start + 1
-    if stocks and wl:
-        max_tickers = max(1, (rw2 - 4) // 19)
-        for sym in wl[:max_tickers]:
-            info = stocks.get(sym.upper())
-            if info:
-                arrow   = "▲" if info["change"] > 0 else ("▼" if info["change"] < 0 else "─")
-                col     = P_GREEN if info["change"] >= 0 else P_RED
-                s       = f"{sym} {arrow}{abs(info['pct']):.1f}%  "
-                if sx + len(s) >= lw + rw2 - 1: break
-                put(win, sy, sx, s, cp(col, bold=True))
-                sx += len(s)
-        put(win, sy, lw + rw2 - 2, "", cp(P_DIM))   # cap
-    put(win, sy + 1, lw + 1, "─" * (rw2 - 2), cp(P_BOX))
-
-    # News headlines (remaining rows)
-    news_start_y = sy + 2
-    news_rows    = todo_h - 4
-    src_cols     = {"Reuters": P_CYAN, "BBC News": P_RED, "AP News": P_AMBER,
-                    "Al Jazeera": P_GREEN, "Times of India": P_AMBER, "NDTV": P_AMBER,
-                    "Hindu": P_GREEN, "Guardian": P_CYAN, "DW": P_BLUE,
-                    "NHK World": P_PINK, "CBC": P_RED, "ABC AU": P_GREEN}
+    flag = c_info["flag"]
+    items = get_news_items()
+    box(win, col_y, lw, news_h, rw, f"NEWS {flag} [→ view 9]")
+    news_rows = max(1, news_h - 2)
     for i, item in enumerate(items[:news_rows]):
-        ny2 = news_start_y + i
-        if ny2 >= mid_start + todo_h - 1: break
-        sc   = src_cols.get(item["source"], P_BLUE)
-        src  = f"[{item['source'][:6]}]"
+        ny = col_y + 1 + i
+        if ny >= col_y + news_h - 1:
+            break
+        src = f"[{item['source'][:6]}]"
         line = f"{src} {item['title']}"
-        put(win, ny2, lw+2, line[:rw2-3], cp(P_HI if i == 0 else P_MID))
+        put(win, ny, lw + 2, line[:max(8, rw - 3)], cp(P_HI if i == 0 else P_MID))
 
-    # ── Pomodoro (left) + Next Event (right) below todos ─────────────────────
-    by = mid_start + todo_h + 1
-    hw = W//2 - 1
-    box(win, by, 0, 5, hw, "POMODORO  [p]=start  [r]=reset")
-    pm=int(ST.pomo_secs)//60; ps=int(ST.pomo_secs)%60
-    pct=int((1-ST.pomo_secs/max(1,ST.pomo_total))*100)
-    pc=P_RED if ST.pomo_phase=="WORK" else P_GREEN
-    sym2="▶" if ST.pomo_run else "||"
-    put(win,by+1,2,f" {sym2}  {pm:02d}:{ps:02d}  {ST.pomo_phase}",cp(pc,bold=True))
-    hbar(win,by+2,2,hw-4,pct,pc)
-    dots=" ".join("◉" if i<ST.pomo_done else "○" for i in range(8))
-    put(win,by+3,2,dots[:hw-4],cp(P_DIM))
-
-    box(win,by,hw+1,5,W-hw-2,"NEXT EVENT")
-    evtitle,evtime = next_event()
-    put(win,by+1,hw+3,evtitle,cp(P_HI))
-    put(win,by+2,hw+3,evtime, cp(P_DIM))
-
-    # ── Spectrum visualiser ───────────────────────────────────────────────────
-    vy = by + 6
-    vis_h = max(2, H - vy - 3)
-    if vy + vis_h + 1 < H:
-        td   = AUDIO.current
-        lbl  = f"VISUALIZER  ~ {td['name'][:30]} — {td['artist']}"
-        box(win, vy, 0, vis_h+2, W-1, lbl)
-        spec = list(ST._spec_smooth)
-        draw_spectrum(win, vy+1, 1, vis_h, W-3, spec)
+    # ── SYSTEM INFO (right/bottom) ───────────────────────────────────────────
+    sy = col_y + news_h + 1
+    if sys_h >= 6 and sy + sys_h - 1 < H - 1:
+        box(win, sy, lw, sys_h, rw, "SYSTEM INFO")
+        bat = sd["bat_pct"]
+        plug = sd["bat_plug"]
+        bc = P_GREEN if bat > 40 else (P_AMBER if bat > 15 else P_RED)
+        bw = max(4, rw - 15)
+        uh, rem = divmod(sd["uptime"], 3600)
+        um = rem // 60
+        put(win, sy + 1, lw + 2, f"BAT {'+' if plug else ' '}{bat:3d}%", cp(bc, bold=True))
+        hbar(win, sy + 1, lw + 12, bw, bat, bc)
+        put(win, sy + 2, lw + 2, f"CPU  {sd['cpu']:5.1f}%", cp(P_CYAN))
+        hbar(win, sy + 2, lw + 12, bw, int(sd["cpu"]), P_CYAN)
+        put(win, sy + 3, lw + 2, f"MEM  {sd['mem_pct']:5.1f}%", cp(P_BLUE))
+        hbar(win, sy + 3, lw + 12, bw, int(sd["mem_pct"]), P_BLUE)
+        if sys_h >= 7:
+            put(win, sy + 4, lw + 2, f"UP   {uh}h {um:02d}m", cp(P_DIM))
+        if sys_h >= 8:
+            put(win, sy + 5, lw + 2, f"NET  {sd['ssid'][:max(1, rw - 8)]}", cp(P_DIM))
+        if sys_h >= 9:
+            put(win, sy + 6, lw + 2,
+                f"I/O  ↓{kbfmt(sd['net_dn'])} ↑{kbfmt(sd['net_up'])}", cp(P_DIM))
 
     put(win, H-1, 0,
         " [ENTER]=check  [p] pomo  [r] reset  [a] add  [d] del todo  [space]=music  [←→] views  [q] quit ",
@@ -2515,18 +2959,82 @@ def v_dashboard(win, W, H):
 #  VIEW 2 — CLOCK + MUSIC
 # ══════════════════════════════════════════════════════════════════════════════
 def v_clock(win, W, H):
-    now = datetime.datetime.now()
-    ts  = now.strftime("%H:%M")
-    tw  = btw(ts)
-    big_time(win, 2, max(0,(W-tw)//2), ts)
-    centre(win, 8, now.strftime("%A  %B %d, %Y").upper(), cp(P_DIM))
+    lib = AUDIO.library
+    n = len(lib)
 
-    sw = min(W-8, 52)
-    hbar(win, 9, (W-sw)//2, sw, now.second*100//60, P_MID)
+    if W < 90 or H < 24:
+        v_library(win, W, H)
+        return
 
-    mw = min(W-4, 68); mx=(W-mw)//2; my=11
-    td      = AUDIO.current
-    dur     = float(td.get("duration") or 0)
+    put(win, 1, 2, "MUSIC DASHBOARD", cp(P_HI, bold=True) | curses.A_BOLD)
+    put(win, 2, 0, "─" * W, cp(P_BOX))
+
+    top_y = 3
+    shortcuts_h = 4
+    sc_y = H - shortcuts_h
+    usable_h = max(14, sc_y - top_y - 1)
+    top_h = max(9, int(usable_h * 0.62))
+    bottom_y = top_y + top_h + 1
+    bottom_h = max(6, sc_y - bottom_y)
+
+    # Top full-width: library
+    box(win, top_y, 1, top_h, W - 2, "LIBRARY")
+    tabs = [("ALL", "all"), ("BUILT-IN", "builtin"), ("YOUTUBE", "youtube"), ("FILES", "file")]
+    tx = 3
+    for label, key in tabs:
+        active = (LS.filter == key)
+        attr = (cp(P_CYAN, bold=True) | curses.A_REVERSE) if active else cp(P_DIM)
+        pill = f" {label} "
+        put(win, top_y + 1, tx, pill, attr)
+        tx += len(pill) + 1
+
+    idxs = _lib_filtered_indices()
+    fn = len(idxs)
+    put(win, top_y + 1, W - 18, f"{fn}/{n} shown", cp(P_DIM))
+    put(win, top_y + 2, 2, "─" * (W - 4), cp(P_BOX))
+    put(win, top_y + 3, 3, "SRC", cp(P_DIM, bold=True))
+    put(win, top_y + 3, 9, "TITLE", cp(P_DIM, bold=True))
+    put(win, top_y + 3, W - 14, "LENGTH", cp(P_DIM, bold=True))
+    put(win, top_y + 4, 2, "─" * (W - 4), cp(P_BOX))
+
+    rows = max(1, top_h - 7)
+    if fn > 0:
+        if LS.cursor not in idxs:
+            LS.cursor = idxs[0]
+        cpos = idxs.index(LS.cursor)
+        start = max(0, min(cpos - rows // 2, max(0, fn - rows)))
+        vis = idxs[start:start + rows]
+    else:
+        vis = []
+
+    for i, ri in enumerate(vis):
+        trk = lib[ri]
+        ry = top_y + 5 + i
+        sel = (ri == LS.cursor)
+        now = (ri == AUDIO.track_idx)
+        src = trk.get("source", "")
+        src_icon = "B" if src == "builtin" else "Y" if ("youtube" in src or "youtu.be" in src) else "F"
+        durv = trk.get("duration", 0) or 0
+        lens = f"{int(durv)//60}:{int(durv)%60:02d}" if durv > 0 else "live"
+        attr = cp(P_CYAN) | curses.A_REVERSE if sel else cp(P_GREEN if now else P_MID)
+        if sel:
+            put(win, ry, 2, " " * (W - 4), attr)
+        put(win, ry, 3, src_icon, attr)
+        put(win, ry, 5, "▶" if now else "•", cp(P_GREEN if now else P_DIM))
+        put(win, ry, 9, trk.get("name", "")[:max(8, W - 25)], attr)
+        put(win, ry, W - 14, lens[:10], attr)
+
+    if fn == 0:
+        centre(win, top_y + top_h // 2, "No tracks in this filter", cp(P_DIM))
+
+    # Bottom split: left player, right spectrum
+    left_w = W // 2
+    right_x = left_w
+    right_w = W - right_x
+
+    box(win, bottom_y, 1, bottom_h, left_w - 1, "PLAYER")
+    td = AUDIO.current if lib else {"name": "No track", "artist": "-", "duration": 0}
+    dur = float(td.get("duration") or 0)
     with AUDIO._lock:
         elapsed = float(AUDIO.elapsed)
     if dur > 0:
@@ -2534,60 +3042,71 @@ def v_clock(win, W, H):
         pct = int(elapsed / dur * 100)
     else:
         pct = int((elapsed % 60) / 60 * 100)
-    em,es  = divmod(int(elapsed), 60)
-    dm,ds2 = divmod(int(dur), 60) if dur > 0 else (0, 0)
+    em, es = divmod(int(elapsed), 60)
+    dm, ds2 = divmod(int(dur), 60) if dur > 0 else (0, 0)
 
-    box(win, my, mx, 12, mw, "NOW PLAYING")
-    put(win, my+1, mx+2, td["name"][:mw-4], cp(P_HI, bold=True))
-    genre = td.get("genre","")
-    genre_lbl = {"brown":"Brown Noise","pink":"Pink Noise","white":"White Noise",
-                 "rain":"Rain on Glass","space":"Deep Space"}.get(genre,"")
-    sub = f"[{genre_lbl}]  {td['artist']}" if genre_lbl else f"by {td['artist']}"
-    put(win, my+2, mx+2, sub[:mw-4], cp(P_DIM))
-    if not AUDIO._backend:
-        put(win, my+1, mx+mw-22, "! NO AUDIO BACKEND !", cp(P_RED, bold=True))
-        put(win, my+2, mx+2, "  pip install sounddevice  OR  install ffmpeg", cp(P_AMBER))
+    inner_w = max(16, left_w - 8)
+    name_w = max(8, inner_w - 26)
+    name_txt = td.get("name", "")[:name_w]
+    put(win, bottom_y + 1, 3, name_txt, cp(P_HI, bold=True))
+
+    chip_x = 3 + len(name_txt) + 2
+    rep_chip = " R "
+    shf_chip = " S "
+    rep_attr = (cp(P_CYAN, bold=True) | curses.A_REVERSE) if AUDIO.repeat else cp(P_DIM)
+    shf_attr = (cp(P_CYAN, bold=True) | curses.A_REVERSE) if AUDIO.shuffle else cp(P_DIM)
+    if chip_x < left_w - 10:
+        put(win, bottom_y + 1, chip_x, rep_chip, rep_attr)
+        put(win, bottom_y + 1, chip_x + len(rep_chip) + 1, shf_chip, shf_attr)
+
+    put(win, bottom_y + 2, 3, td.get("artist", "")[:max(8, left_w - 8)], cp(P_DIM))
+    hbar(win, bottom_y + 3, 3, max(8, left_w - 8), pct, P_CYAN)
+    put(win, bottom_y + 4, 3, f"{em}:{es:02d}", cp(P_DIM))
+    put(win, bottom_y + 4, max(4, left_w - 9), f"{dm}:{ds2:02d}" if dur > 0 else "live", cp(P_DIM))
+
+    play_chip = " Play/Pause (Space) "
+    play_attr = cp(P_GREEN, bold=True) if AUDIO.playing else cp(P_AMBER, bold=True)
+    put(win, bottom_y + 5, 3, play_chip, play_attr | curses.A_REVERSE)
+    put(win, bottom_y + 6, 3, "Prev (Z)  Next (X)   Repeat (R)  Shuffle (S)", cp(P_DIM))
+
+    box(win, bottom_y, right_x, bottom_h, right_w, "SPECTRUM")
+    spec_h = max(1, bottom_h - 2)
+    draw_spectrum(win, bottom_y + 1, right_x + 1, spec_h, right_w - 2, ST._spec_smooth)
+
+    # Bottom input/confirm panel for LS modes
+    if LS.mode in ("add_url", "add_file", "confirm_del"):
+        oy = max(3, H // 2 - 3)
+        ow = min(W - 6, 86)
+        ox = (W - ow) // 2
+        if LS.mode == "confirm_del":
+            box(win, oy, ox, 4, ow, "REMOVE TRACK")
+            trk = lib[LS.cursor] if 0 <= LS.cursor < len(lib) else {}
+            centre(win, oy + 1,
+                   f"Remove '{trk.get('name','?')[:40]}' ?  Y=yes  N/Esc=cancel",
+                   cp(P_RED, bold=True))
+        else:
+            title = "ADD YOUTUBE" if LS.mode == "add_url" else "ADD LOCAL FILE"
+            box(win, oy, ox, 6, ow, title)
+            put(win, oy + 1, ox + 2, "Paste and press Enter", cp(P_DIM))
+            blink = "_" if int(time.time() * 2) % 2 else " "
+            disp = LS.buf if len(LS.buf) <= ow - 8 else "..." + LS.buf[-(ow - 11):]
+            put(win, oy + 2, ox + 2, (disp + blink)[:ow-4], cp(P_AMBER, bold=True))
+            put(win, oy + 4, ox + 2, "Esc to cancel", cp(P_DIM))
+
+    box(win, sc_y, 1, shortcuts_h, W - 2, "SHORTCUTS")
+
+    if W >= 140:
+        line1 = "Library: 1/2/3/4 filter | j/k browse | Enter play | Y add URL | F add file | D remove"
+        line2 = "Player: Space play/pause | Z/X prev-next | R repeat | S shuffle | Left/Right switch views"
+    elif W >= 115:
+        line1 = "Library: 1/2/3/4 filter | j/k browse | Enter play | Y URL | F file | D remove"
+        line2 = "Player: Space play/pause | Z/X prev-next | R repeat | S shuffle | ←/→ views"
     else:
-        bname = os.path.basename(AUDIO._backend) if os.path.isfile(AUDIO._backend) else AUDIO._backend
-        put(win, my+1, mx+mw-len(bname)-4, bname, cp(P_DIM))
+        line1 = "Library: 1-4 filter | j/k | Enter | Y/F add | D remove"
+        line2 = "Player: Space | Z/X | R repeat | S shuffle | ←/→ views"
 
-    hbar(win, my+3, mx+2, mw-4, pct, P_CYAN)
-    put(win, my+4, mx+2, f"{em}:{es:02d}", cp(P_DIM))
-    rt = f"{dm}:{ds2:02d}" if dur > 0 else "live"
-    put(win, my+4, mx+mw-2-len(rt), rt, cp(P_DIM))
-
-    play_lbl = "[ || PAUSE ]" if AUDIO.playing else "[ ▶ PLAY  ]"
-    play_col = P_AMBER if AUDIO.playing else P_GREEN
-    put(win, my+5, mx+2,        "|< prev [z]",  cp(P_DIM))
-    put(win, my+5, mx+mw//2-6,  play_lbl,       cp(play_col, bold=True))
-    put(win, my+5, mx+mw-12,    "next [x] >|",  cp(P_DIM))
-
-    scol = P_AMBER if AUDIO.shuffle else P_DIM
-    rcol = P_AMBER if AUDIO.repeat  else P_DIM
-    shuf_s=f"[{'◈' if AUDIO.shuffle else '◇'}] SHUFFLE [s]"
-    rep_s =f"[{'◈' if AUDIO.repeat  else '◇'}] REPEAT  [R]"
-    put(win, my+6, mx+2,        shuf_s,  cp(scol))
-    put(win, my+6, mx+mw//2+2,  rep_s,   cp(rcol))
-    put(win, my+6, mx+mw-10,    f"{AUDIO.track_idx+1}/{len(AUDIO.library)}", cp(P_DIM))
-
-    for i in range(min(4, len(AUDIO.library))):
-        ri = (AUDIO.track_idx + i) % len(AUDIO.library)
-        t_entry = AUDIO.library[ri]; tn, ta = t_entry["name"], t_entry["artist"]
-        sel = (ri == AUDIO.track_idx)
-        pre = "▶ " if sel else "  "
-        put(win, my+7+i, mx+2,
-            f"{pre}{tn[:mw//2-4]}  —  {ta}"[:mw-4],
-            cp(P_HI if sel else P_DIM))
-
-    vy  = my + 12 + 1
-    vis_h = max(3, H - vy - 3)
-    if vy + vis_h + 1 < H:
-        box(win, vy, mx, vis_h+2, mw, "SPECTRUM")
-        draw_spectrum(win, vy+1, mx+1, vis_h, mw-2, ST._spec_smooth)
-
-    put(win, H-1, 0,
-        " [space] play/pause  [z] prev  [x] next  [s] shuffle  [R] repeat  [←→] views ",
-        cp(P_DIM))
+    centre(win, sc_y + 1, line1[:W-6], cp(P_DIM))
+    centre(win, sc_y + 2, line2[:W-6], cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  VIEW 3 — FOCUS / POMODORO
@@ -2848,6 +3367,7 @@ def v_network(win, W, H):
 # ══════════════════════════════════════════════════════════════════════════════
 class LibState:
     cursor   = 0
+    filter   = "all"
     mode     = "browse"
     buf      = ""
     msg      = ""
@@ -2855,96 +3375,162 @@ class LibState:
 
 LS = LibState()
 
+
+def _lib_matches_filter(trk, fkey):
+    src = trk.get("source", "")
+    is_builtin = (src == "builtin")
+    is_youtube = (not is_builtin) and ("youtube" in src or "youtu.be" in src)
+    if fkey == "builtin":
+        return is_builtin
+    if fkey == "youtube":
+        return is_youtube
+    if fkey == "file":
+        return (not is_builtin) and (not is_youtube)
+    return True
+
+
+def _lib_filtered_indices():
+    lib = AUDIO.library
+    return [i for i, trk in enumerate(lib) if _lib_matches_filter(trk, LS.filter)]
+
 def v_library(win, W, H):
     lib = AUDIO.library
-    n   = len(lib)
+    n = len(lib)
+    user_n = max(0, len(lib) - len(BUILTIN_TRACKS))
+    filt_idx = _lib_filtered_indices()
+    fn = len(filt_idx)
 
-    centre(win, 1, "MUSIC LIBRARY", cp(P_HI, bold=True)|curses.A_BOLD)
-    centre(win, 2, f"{n} track{'s' if n!=1 else ''}  ·  {len(lib)-len(BUILTIN_TRACKS)} user-added",
-           cp(P_DIM))
+    # Header row (Apple-like clean title + segmented metadata)
+    put(win, 1, 2, "MUSIC LIBRARY", cp(P_HI, bold=True) | curses.A_BOLD)
+    seg = f" {n} Tracks "
+    seg2 = f" {user_n} Added "
+    sx = max(2, W - len(seg) - len(seg2) - 6)
+    put(win, 1, sx, seg, cp(P_CYAN, bold=True) | curses.A_REVERSE)
+    put(win, 1, sx + len(seg) + 1, seg2, cp(P_DIM))
+    tabs = [("ALL", "all"), ("BUILT-IN", "builtin"), ("YOUTUBE", "youtube"), ("FILES", "file")]
+    tx = 2
+    for label, key in tabs:
+        active = (LS.filter == key)
+        attr = (cp(P_CYAN, bold=True) | curses.A_REVERSE) if active else cp(P_DIM)
+        pill = f" {label} "
+        put(win, 2, tx, pill, attr)
+        tx += len(pill) + 1
+    put(win, 2, max(2, W - 20), f"Showing {fn}/{n}", cp(P_DIM))
+    put(win, 3, 0, "─" * W, cp(P_BOX))
 
-    list_h  = H - 16
-    list_y  = 4
-    box(win, list_y, 1, list_h, W-2, "TRACKS  [j/k]=nav  [ENTER]=play  [D]=delete")
+    # Hero card
+    hero_y = 4
+    hero_h = 5
+    box(win, hero_y, 1, hero_h, W - 2, "NOW PLAYING")
+    cur = AUDIO.current if lib else {"name": "No track", "artist": "-", "source": ""}
+    src = cur.get("source", "")
+    src_lbl = "BUILT-IN" if src == "builtin" else "YOUTUBE" if ("youtube" in src or "youtu.be" in src) else "LOCAL"
+    state = "PLAYING" if AUDIO.playing else "PAUSED"
+    state_col = cp(P_GREEN, bold=True) if AUDIO.playing else cp(P_AMBER, bold=True)
+    put(win, hero_y + 1, 3, cur.get("name", "")[: max(10, W - 20)], cp(P_HI, bold=True))
+    put(win, hero_y + 2, 3, cur.get("artist", "")[: max(10, W - 20)], cp(P_DIM))
+    put(win, hero_y + 1, max(3, W - 22), f" {state} ", state_col | curses.A_REVERSE)
+    put(win, hero_y + 2, max(3, W - 22), f" {src_lbl} ", cp(P_DIM))
+    put(win, hero_y + 3, 3,
+        f"Queue {AUDIO.track_idx+1 if n else 0}/{n}   Shuffle {'On' if AUDIO.shuffle else 'Off'}   Repeat {'On' if AUDIO.repeat else 'Off'}",
+        cp(P_MID))
 
-    start = max(0, LS.cursor - list_h + 4)
-    for i, trk in enumerate(lib[start:start+list_h-2]):
-        ri  = start + i
-        ry  = list_y + 1 + i
+    # List panel
+    list_y = hero_y + hero_h + 1
+    panel_h = 7 if H >= 30 else 6
+    list_h = max(8, H - list_y - panel_h - 3)
+    box(win, list_y, 1, list_h, W - 2, "TRACKS")
+    put(win, list_y + 1, 3, "SRC", cp(P_DIM, bold=True))
+    put(win, list_y + 1, 10, "TITLE", cp(P_DIM, bold=True))
+    put(win, list_y + 1, max(12, W - 26), "DURATION", cp(P_DIM, bold=True))
+    put(win, list_y + 1, max(12, W - 15), "TYPE", cp(P_DIM, bold=True))
+    put(win, list_y + 2, 2, "─" * (W - 5), cp(P_BOX))
+
+    rows = max(1, list_h - 4)
+    if fn == 0:
+        LS.cursor = 0
+        vis_idx = []
+        start_pos = 0
+    else:
+        if LS.cursor not in filt_idx:
+            LS.cursor = filt_idx[0]
+        cur_pos = filt_idx.index(LS.cursor)
+        start_pos = max(0, min(cur_pos - rows // 2, max(0, fn - rows)))
+        vis_idx = filt_idx[start_pos:start_pos + rows]
+
+    for i, ri in enumerate(vis_idx):
+        trk = lib[ri]
+        ry = list_y + 3 + i
         sel = (ri == LS.cursor)
         now = (ri == AUDIO.track_idx)
 
-        src = trk.get("source","")
-        src_icon = "[B]" if src=="builtin" else "[Y]" if ("youtube" in src or "youtu.be" in src) else "[F]"
-        play_sym = "> " if now else "  "
-        dur      = trk.get("duration", 0) or 0
-        if dur > 0:
-            dm, ds_ = divmod(int(dur), 60)
-            dur_s   = f"{dm}:{ds_:02d}"
-        else:
-            dur_s   = "live"
-        desc = trk.get("desc","") or trk.get("artist","")
+        src = trk.get("source", "")
+        src_icon = "B" if src == "builtin" else "Y" if ("youtube" in src or "youtu.be" in src) else "F"
+        dur = trk.get("duration", 0) or 0
+        dur_s = f"{int(dur)//60}:{int(dur)%60:02d}" if dur > 0 else "live"
+        typ = "built-in" if src == "builtin" else "youtube" if src_icon == "Y" else "file"
 
-        col  = P_AMBER if sel else (P_GREEN if now else P_MID)
-        attr = cp(col) | (curses.A_REVERSE if sel else 0)
-        name_w = max(10, W-40)
-        line = f" {play_sym}{src_icon} {trk['name'][:name_w]:<{name_w}}  {dur_s:<6}  {desc[:20]}"
-        put(win, ry, 1, " "*(W-3), attr if sel else 0)
-        put(win, ry, 1, line[:W-3], attr)
+        title_w = max(8, W - 40)
+        row_attr = cp(P_CYAN) | curses.A_REVERSE if sel else cp(P_GREEN if now else P_MID)
+        if sel:
+            put(win, ry, 2, " " * (W - 5), row_attr)
+        put(win, ry, 3, src_icon, row_attr)
+        put(win, ry, 6, "▶" if now else "•", cp(P_GREEN if now else P_DIM))
+        put(win, ry, 10, trk.get("name", "")[:title_w], row_attr)
+        put(win, ry, max(12, W - 26), dur_s[:8], row_attr)
+        put(win, ry, max(12, W - 15), typ[:10], row_attr)
 
-    if n > list_h-2:
-        put(win, list_y, W-10, f" {LS.cursor+1}/{n} ", cp(P_DIM))
+    if fn > rows and fn > 0:
+        pos = filt_idx.index(LS.cursor) + 1 if LS.cursor in filt_idx else 1
+        put(win, list_y, W - 15, f" {pos}/{fn} ", cp(P_DIM))
+    elif fn == 0:
+        centre(win, list_y + max(2, list_h // 2), "No tracks in this filter", cp(P_DIM))
 
+    # Message area
     if LS.msg and time.time() - LS.msg_time > 4.0:
         LS.msg = ""
     msg = AUDIO.status_msg or LS.msg
     if msg:
-        col = P_RED if "ERROR" in msg else P_GREEN if "Added" in msg else P_AMBER
-        centre(win, list_y+list_h, msg[:W-4], cp(col, bold=True))
+        col = P_RED if "ERROR" in msg else (P_GREEN if "Added" in msg or "Removed" in msg else P_AMBER)
+        put(win, list_y + list_h, 2, msg[:W-4], cp(col, bold=True))
 
     panel_y = list_y + list_h + 1
-    blink   = "_" if int(time.time()*2)%2 else " "
+    blink = "_" if int(time.time() * 2) % 2 else " "
 
     if LS.mode == "add_url":
-        box(win, panel_y, 2, 6, W-4, "ADD YOUTUBE URL")
-        put(win, panel_y+1, 4,
-            "Right-click paste (or type) the URL, then ENTER.  ESC = cancel.",
-            cp(P_DIM))
-        disp = LS.buf if len(LS.buf) <= W-12 else "..." + LS.buf[-(W-15):]
-        put(win, panel_y+2, 4, (disp + blink)[:W-8], cp(P_AMBER, bold=True))
-        put(win, panel_y+3, 4, f"chars: {len(LS.buf)}", cp(P_DIM))
-        put(win, panel_y+4, 4,
-            "youtube.com/watch?v=XXXX   youtu.be/XXXX   music.youtube.com/...",
-            cp(P_DIM))
+        box(win, panel_y, 2, panel_h, W - 4, "ADD YOUTUBE")
+        put(win, panel_y + 1, 4, "Paste URL and press Enter", cp(P_DIM))
+        disp = LS.buf if len(LS.buf) <= W - 12 else "..." + LS.buf[-(W - 15):]
+        put(win, panel_y + 2, 4, (disp + blink)[:W-8], cp(P_AMBER, bold=True))
+        put(win, panel_y + 3, 4, "youtube.com / youtu.be / music.youtube.com", cp(P_DIM))
+        put(win, panel_y + 4, 4, "Esc to cancel", cp(P_DIM))
 
     elif LS.mode == "add_file":
-        box(win, panel_y, 2, 6, W-4, "ADD LOCAL FILE")
-        put(win, panel_y+1, 4,
-            "Right-click paste (or type) the file path, then ENTER.  ESC = cancel.",
-            cp(P_DIM))
-        disp = LS.buf if len(LS.buf) <= W-12 else "..." + LS.buf[-(W-15):]
-        put(win, panel_y+2, 4, (disp + blink)[:W-8], cp(P_AMBER, bold=True))
-        put(win, panel_y+3, 4, f"chars: {len(LS.buf)}", cp(P_DIM))
-        put(win, panel_y+4, 4,
-            "Supports: MP3  FLAC  WAV  OGG  M4A  AAC  OPUS  WEBM",
-            cp(P_DIM))
+        box(win, panel_y, 2, panel_h, W - 4, "ADD LOCAL FILE")
+        put(win, panel_y + 1, 4, "Paste absolute file path and press Enter", cp(P_DIM))
+        disp = LS.buf if len(LS.buf) <= W - 12 else "..." + LS.buf[-(W - 15):]
+        put(win, panel_y + 2, 4, (disp + blink)[:W-8], cp(P_AMBER, bold=True))
+        put(win, panel_y + 3, 4, "MP3 FLAC WAV OGG M4A AAC OPUS WEBM", cp(P_DIM))
+        put(win, panel_y + 4, 4, "Esc to cancel", cp(P_DIM))
 
     elif LS.mode == "confirm_del":
         trk = lib[LS.cursor] if LS.cursor < len(lib) else {}
-        box(win, panel_y, 2, 4, W-4, "CONFIRM DELETE")
-        centre(win, panel_y+1,
-               f"Delete '{trk.get('name','?')[:40]}'?  [Y]=yes  [N/ESC]=cancel",
+        box(win, panel_y, 2, 4, W - 4, "REMOVE TRACK")
+        centre(win, panel_y + 1,
+               f"Remove '{trk.get('name','?')[:40]}' from library?  Y=yes  N/Esc=cancel",
                cp(P_RED, bold=True))
 
     else:
-        box(win, panel_y, 2, 4, W-4, "ACTIONS")
-        actions = "[Y] Add YouTube URL    [F] Add local file    [D] Delete selected    [ENTER] Play"
-        centre(win, panel_y+1, actions[:W-6], cp(P_DIM))
-        legend = "[B]=built-in  [Y]=YouTube  [F]=local file   ~ playing now   > selected"
-        centre(win, panel_y+2, legend[:W-6], cp(P_DIM))
+        box(win, panel_y, 2, 4, W - 4, "QUICK ACTIONS")
+        centre(win, panel_y + 1,
+               "Y add YouTube   F add file   D remove selected   Enter play selected",
+               cp(P_DIM))
+        centre(win, panel_y + 2,
+             "Filters: 1 All   2 Built-in   3 YouTube   4 Files",
+               cp(P_DIM))
 
-    put(win, H-1, 0,
-        " [Y]=add YouTube  [F]=add file  [D]=del  [ENTER]=play  [j/k]=nav  [←→] views ",
+    put(win, H - 1, 0,
+         " 1/2/3/4 filter   Y add YouTube   F add file   D remove   Enter play   j/k browse ",
         cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2957,7 +3543,11 @@ def draw_topbar(win, W):
     bc=P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
     put(win,0,0," "*W, cp(P_DIM)|curses.A_REVERSE)
     put(win,0,1,f" {ts}  {ds}", cp(P_HI)|curses.A_REVERSE)
-    vn=f"  {VIEWS[ST.view]}  "
+    if 0 <= ST.view < len(ALL_VIEW_NAMES):
+        view_name = ALL_VIEW_NAMES[ST.view]
+    else:
+        view_name = "UNKNOWN VIEW"
+    vn=f"  {view_name}  "
     put(win,0,(W-len(vn))//2,vn, cp(P_HI)|curses.A_REVERSE|curses.A_BOLD)
     if AUDIO.playing:
         td=AUDIO.current
@@ -3008,6 +3598,10 @@ class CalState:
     cur_ev    = 0
     ics_mode  = False
     ics_buf   = ""
+    ics_step  = 0
+    ics_name_buf = ""
+    ics_sel_mode = False
+    ics_sel_idx = 0
     msg       = ""
     msg_time  = 0.0
     local_evs = []
@@ -3079,6 +3673,13 @@ def _cal_draw_header(win, W, H, now, today):
         tab_pos.append((len(tab_str), name))
         tab_str += f" {name} "
     tx = W - len(tab_str) - 3
+
+    n_conn = get_connected_ics_count()
+    conn = f"iCal {n_conn}" if n_conn else "iCal 0"
+    conn_col = cp(P_GREEN, bold=True) if n_conn else cp(P_DIM)
+    conn_x = max(today_x + len(today_lbl) + 1, tx - len(conn) - 2)
+    put(win, 0, conn_x, conn, conn_col)
+
     put(win, 0, tx - 1, "[", cp(P_BOX))
     for off, name in tab_pos:
         active = (CS.mode == name.lower())
@@ -3132,14 +3733,40 @@ def _cal_draw_overlay(win, W, H):
         put(win, oy + 11, ox + 20, "Esc · Cancel", cp(P_DIM))
 
     elif CS.ics_mode:
+        n_conn = get_connected_ics_count()
         put(win, oy,     ox + 2, "  ⟳ Connect Calendar", cp(P_CYAN, bold=True))
         put(win, oy + 1, ox + 1, "─" * (ow - 2), cp(P_BOX))
         put(win, oy + 3, ox + 3, "Google: Settings → Secret address in iCal format", cp(P_DIM))
         put(win, oy + 4, ox + 3, "Apple:  File → Export → ~/.terminal_standby.ics", cp(P_DIM))
-        put(win, oy + 6, ox + 3, "URL / path:", cp(P_DIM))
-        put(win, oy + 7, ox + 3, f"{CS.ics_buf}{blink}", cp(P_HI, bold=True))
+        put(win, oy + 6, ox + 3, "URL / path:", cp(P_DIM if CS.ics_step != 0 else P_CYAN))
+        put(win, oy + 7, ox + 3, f"{CS.ics_buf}{blink if CS.ics_step == 0 else ''}", cp(P_HI, bold=True))
+        put(win, oy + 8, ox + 3, "Name:", cp(P_DIM if CS.ics_step != 1 else P_CYAN))
+        put(win, oy + 9, ox + 3, f"{CS.ics_name_buf}{blink if CS.ics_step == 1 else ''}", cp(P_HI, bold=True))
+        put(win, oy + 10, ox + 1, "─" * (ow - 2), cp(P_BOX))
+        action = "Enter · Next" if CS.ics_step == 0 else "Enter · Connect"
+        put(win, oy + 11, ox + 3, f"Connected: {n_conn}   {action}   D · Choose Disconnect   Esc · Cancel", cp(P_DIM))
+
+    elif CS.ics_sel_mode:
+        srcs = get_connected_ics_sources()
+        n = len(srcs)
+        put(win, oy,     ox + 2, "  ⛓ Connected Calendars", cp(P_CYAN, bold=True))
+        put(win, oy + 1, ox + 1, "─" * (ow - 2), cp(P_BOX))
+        if n == 0:
+            put(win, oy + 4, ox + 3, "No connected iCal sources", cp(P_DIM))
+        else:
+            CS.ics_sel_idx = max(0, min(CS.ics_sel_idx, n - 1))
+            max_rows = 5
+            start = 0
+            if CS.ics_sel_idx >= max_rows:
+                start = CS.ics_sel_idx - max_rows + 1
+            for i in range(start, min(n, start + max_rows)):
+                row = oy + 3 + (i - start)
+                lab = srcs[i].get("label", srcs[i].get("source", ""))
+                prefix = "▶" if i == CS.ics_sel_idx else " "
+                attr = cp(P_HI, bold=True) if i == CS.ics_sel_idx else cp(P_MID)
+                put(win, row, ox + 3, f"{prefix} {i+1}. {lab}"[:ow-6], attr)
         put(win, oy + 9, ox + 1, "─" * (ow - 2), cp(P_BOX))
-        put(win, oy + 10, ox + 3, "Enter · Sync     Esc · Cancel", cp(P_DIM))
+        put(win, oy + 10, ox + 3, "↑/↓ · Select   Enter · Disconnect   Esc · Cancel", cp(P_DIM))
 
     elif CS.del_mode:
         ev = CS.local_evs[CS.del_idx] if 0 <= CS.del_idx < len(CS.local_evs) else None
@@ -3248,84 +3875,123 @@ def _cal_view_day(win, W, H, now, today, CY, CH):
 
 
 def _cal_view_week(win, W, H, now, today, CY, CH):
-    """Apple-Calendar week view: day columns with time gutter, event pills."""
+    """Apple-like week view with cleaner grid and right-side agenda rail."""
     week, ev_map = _evs_for_week(CS.date)
-    GUTTER  = 6
-    n_cols  = 7
-    col_w   = max(4, (W - GUTTER - 1) // n_cols)
-    FIRST_H, LAST_H = 7, 22
+
+    rail_w = 0
+    if W >= 110:
+        rail_w = 26
+    grid_w = W - rail_w
+
+    GUTTER = 6
+    n_cols = 7
+    col_w = max(5, (grid_w - GUTTER - 1) // n_cols)
+    grid_end_x = GUTTER + 1 + n_cols * col_w
+
+    FIRST_H, LAST_H = 8, 21
     n_hours = LAST_H - FIRST_H + 1
-    body_h  = CH - 4          # rows for time grid
-    slot_h  = max(1, body_h // n_hours)
+    body_h = CH - 4
+    slot_h = max(1, body_h // n_hours)
 
-    # ── Column headers ────────────────────────────────────────────────────────
     for i, d in enumerate(week):
-        x    = GUTTER + 1 + i * col_w
-        is_t = (d == today)
-        dow  = d.strftime("%a").upper()
-        num  = str(d.day)
-        if is_t:
-            put(win, CY,     x, dow, cp(P_DIM))
-            # circle today's date number
+        x = GUTTER + 1 + i * col_w
+        dow = d.strftime("%a").upper()
+        num = str(d.day)
+        if d == today:
+            put(win, CY, x, dow, cp(P_DIM))
             put(win, CY + 1, x, f"[{num}]", cp(P_AMBER, bold=True))
-            put(win, CY + 2, x, "─" * (col_w - 1), cp(P_AMBER))
         elif d == CS.date:
-            put(win, CY,     x, dow, cp(P_DIM))
-            put(win, CY + 1, x, num, cp(P_CYAN, bold=True))
+            put(win, CY, x, dow, cp(P_DIM))
+            put(win, CY + 1, x, num, cp(P_CYAN, bold=True) | curses.A_UNDERLINE)
         else:
-            wknd = (d.weekday() >= 5)
-            put(win, CY,     x, dow, cp(P_BOX if wknd else P_DIM))
-            put(win, CY + 1, x, num, cp(P_BOX if wknd else P_MID))
+            put(win, CY, x, dow, cp(P_DIM if d.weekday() < 5 else P_BOX))
+            put(win, CY + 1, x, num, cp(P_MID if d.weekday() < 5 else P_BOX))
 
-    # header rule
-    put(win, CY + 2, GUTTER + 1, "─" * (n_cols * col_w), cp(P_BOX))
+    put(win, CY + 2, GUTTER + 1, "─" * max(1, grid_end_x - (GUTTER + 1)), cp(P_BOX))
 
-    # ── Time gutter + column dividers ─────────────────────────────────────────
     for hi, hour in enumerate(range(FIRST_H, LAST_H + 1)):
         hy = CY + 3 + hi * slot_h
-        if hy >= CY + CH: break
-        is_now_h = (CS.date.weekday() < 7) and now.date() in week and now.hour == hour
+        if hy >= CY + CH:
+            break
         hcol = P_AMBER if (now.date() in week and now.hour == hour) else P_DIM
-        if slot_h >= 2 or hour % 2 == 0:
+        if hour % 2 == 0 or slot_h >= 2:
             put(win, hy, 0, f"{hour:02d}:00", cp(hcol))
-        put(win, hy, GUTTER, "┤", cp(P_BOX))
-        # horizontal hour rule across all columns
-        put(win, hy, GUTTER + 1, "─" * (n_cols * col_w), cp(P_BOX))
+            put(win, hy, GUTTER + 1, "╌" * max(1, grid_end_x - (GUTTER + 1)), cp(P_BOX))
+        else:
+            put(win, hy, GUTTER, "┆", cp(P_BOX))
 
-    # vertical column dividers
     for i in range(1, n_cols):
         x = GUTTER + i * col_w
         for r in range(CY + 2, CY + CH):
-            try: win.addch(r, x, curses.ACS_VLINE, cp(P_BOX))
-            except: pass
+            try:
+                win.addch(r, x, curses.ACS_VLINE, cp(P_BOX))
+            except Exception:
+                pass
 
-    # now-line
-    if now.date() in week:
+    if now.date() in week and FIRST_H <= now.hour <= LAST_H:
         day_idx = week.index(now.date())
-        frac    = (now.hour - FIRST_H + now.minute / 60) / n_hours
-        now_y   = CY + 3 + int(frac * body_h)
-        now_y   = max(CY + 3, min(now_y, CY + CH - 1))
-        nx      = GUTTER + 1 + day_idx * col_w
-        put(win, now_y, nx, "▶" + "─" * (col_w - 2), cp(P_RED, bold=True))
+        frac = (now.hour - FIRST_H + now.minute / 60.0) / n_hours
+        now_y = CY + 3 + int(frac * body_h)
+        now_y = max(CY + 3, min(now_y, CY + CH - 1))
+        nx = GUTTER + 1 + day_idx * col_w
+        put(win, now_y, nx, "▶" + "─" * max(1, col_w - 2), cp(P_RED, bold=True))
 
-    # ── Events ────────────────────────────────────────────────────────────────
     for i, d in enumerate(week):
-        x    = GUTTER + 1 + i * col_w
-        devs = ev_map.get(d, [])
-        is_t = (d == today)
-        for ri, (s, t) in enumerate(devs):
-            frac   = (s.hour - FIRST_H + s.minute / 60) / n_hours
-            ey     = CY + 3 + int(frac * body_h)
-            ey     = max(CY + 3, min(ey, CY + CH - 1))
-            past   = s < now
-            is_t_d = (d == today)
-            ecol   = P_DIM if past else (P_CYAN if is_t_d else P_BLUE)
-            txt    = f"·{s.strftime('%H:%M')} {t}"[:col_w - 1]
-            if not past:
-                put(win, ey, x, " " * (col_w - 1), cp(ecol) | curses.A_REVERSE)
-                put(win, ey, x, txt, cp(P_HI, bold=True) | curses.A_REVERSE)
+        x = GUTTER + 1 + i * col_w
+        day_events = sorted(ev_map.get(d, []), key=lambda it: it[0])
+        used_rows = set()
+        for s, t in day_events[:18]:
+            frac = (s.hour - FIRST_H + s.minute / 60.0) / n_hours
+            ey = CY + 3 + int(frac * body_h)
+            ey = max(CY + 3, min(ey, CY + CH - 1))
+            while ey in used_rows and ey < CY + CH - 1:
+                ey += 1
+            used_rows.add(ey)
+
+            past = s < now
+            if past:
+                attr = cp(P_DIM)
+            elif d == today:
+                attr = cp(P_HI, bold=True)
             else:
-                put(win, ey, x, txt, cp(ecol))
+                attr = cp(P_CYAN)
+            txt = f"{s.strftime('%H:%M')} {t}"[: max(1, col_w - 1)]
+            put(win, ey, x, txt, attr)
+
+    if rail_w:
+        rx = grid_end_x + 1
+        for r in range(CY, CY + CH):
+            try:
+                win.addch(r, rx - 1, curses.ACS_VLINE, cp(P_BOX))
+            except Exception:
+                pass
+
+        put(win, CY, rx + 1, "AGENDA", cp(P_CYAN, bold=True))
+        put(win, CY + 1, rx + 1, CS.date.strftime("%a %d %b"), cp(P_DIM))
+
+        devs = sorted(_evs_for_day(CS.date), key=lambda ev: ev[0])
+        y = CY + 3
+        if not devs:
+            put(win, y, rx + 1, "No events", cp(P_DIM))
+        else:
+            for s, e, t in devs[: max(1, CH - 6)]:
+                is_local = any(
+                    lev.get("title") == t and
+                    lev.get("dt", "").startswith(s.strftime("%Y-%m-%d"))
+                    for lev in CS.local_evs
+                )
+                marker = "●" if is_local else "○"
+                line = f"{marker} {s.strftime('%H:%M')} {t}"[: max(1, rail_w - 4)]
+                attr = cp(P_DIM if s < now else P_HI, bold=(s >= now))
+                put(win, y, rx + 1, line, attr)
+                y += 1
+                if y >= CY + CH - 2:
+                    break
+
+        n_conn = get_connected_ics_count()
+        src = f"{n_conn} connected" if n_conn else "Not connected"
+        scol = cp(P_GREEN) if n_conn else cp(P_DIM)
+        put(win, CY + CH - 2, rx + 1, f"iCal: {src}", scol)
 
 
 def _cal_view_month(win, W, H, now, today, CY, CH):
@@ -3487,7 +4153,7 @@ def v_calendar(win, W, H):
     _cal_draw_header(win, W, H, now, today)
 
     # ── Status / hint bar ─────────────────────────────────────────────────────
-    hint = " j/k·nav   a·add   d·del   G·sync   t·today   1·Day  2·Week  3·Month  4·Year "
+    hint = " j/k nav  a add  D disconnect  G connect  t today  1/2/3/4 views "
     if CS.msg:
         hcol = P_RED if "ERROR" in CS.msg else P_GREEN
         put(win, H - 1, 0, (" " + CS.msg)[: W], cp(hcol, bold=True))
@@ -3498,7 +4164,7 @@ def v_calendar(win, W, H):
     CH = H - 3
 
     # ── Overlay panels take priority ──────────────────────────────────────────
-    if CS.add_mode or CS.ics_mode or CS.del_mode:
+    if CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode:
         _cal_draw_overlay(win, W, H)
         return
 
@@ -3593,20 +4259,63 @@ def _handle_cal_input(k):
             CS.del_mode = False; CS.del_idx = -1
 
     elif CS.ics_mode:
+        if k == ord('D'):
+            CS.ics_mode = False
+            CS.ics_step = 0
+            CS.ics_name_buf = ""
+            CS.ics_sel_mode = True
+            CS.ics_sel_idx = 0
+            return
         if k in (10, 13):
-            url = CS.ics_buf.strip()
-            if url:
-                def _sync(u=url):
-                    ok, msg = fetch_ics_url(u)
-                    CS.msg = msg; CS.msg_time = time.time()
-                threading.Thread(target=_sync, daemon=True).start()
-            CS.ics_mode = False; CS.ics_buf = ""
+            if CS.ics_step == 0:
+                if CS.ics_buf.strip():
+                    CS.ics_step = 1
+                else:
+                    CS.msg = "Enter URL/path first"; CS.msg_time = time.time()
+            else:
+                url = CS.ics_buf.strip()
+                if url:
+                    name = CS.ics_name_buf.strip()
+                    def _sync(u=url, n=name):
+                        ok, msg = fetch_ics_url(u, n)
+                        CS.msg = msg; CS.msg_time = time.time()
+                    threading.Thread(target=_sync, daemon=True).start()
+                CS.ics_mode = False
+                CS.ics_buf = ""
+                CS.ics_step = 0
+                CS.ics_name_buf = ""
         elif k == 27:
-            CS.ics_mode = False; CS.ics_buf = ""
+            CS.ics_mode = False
+            CS.ics_buf = ""
+            CS.ics_step = 0
+            CS.ics_name_buf = ""
         elif k in (curses.KEY_BACKSPACE, 127, 8):
-            CS.ics_buf = CS.ics_buf[:-1]
+            if CS.ics_step == 0:
+                CS.ics_buf = CS.ics_buf[:-1]
+            else:
+                CS.ics_name_buf = CS.ics_name_buf[:-1]
         elif 32 <= k <= 126:
-            CS.ics_buf += chr(k)
+            if CS.ics_step == 0:
+                CS.ics_buf += chr(k)
+            else:
+                CS.ics_name_buf += chr(k)
+
+    elif CS.ics_sel_mode:
+        srcs = get_connected_ics_sources()
+        if k in (27, ord('n'), ord('N')):
+            CS.ics_sel_mode = False
+        elif k in (curses.KEY_UP, ord('k')) and srcs:
+            CS.ics_sel_idx = (CS.ics_sel_idx - 1) % len(srcs)
+        elif k in (curses.KEY_DOWN, ord('j')) and srcs:
+            CS.ics_sel_idx = (CS.ics_sel_idx + 1) % len(srcs)
+        elif k in (10, 13):
+            if srcs:
+                ok, msg = disconnect_ics_calendar(source_idx=CS.ics_sel_idx)
+                CS.msg = msg; CS.msg_time = time.time()
+                CS.ics_sel_idx = 0
+            else:
+                CS.msg = "No connected calendar"; CS.msg_time = time.time()
+            CS.ics_sel_mode = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3624,56 +4333,112 @@ def v_video(win, W, H):
     if VS.msg and time.time() - VS.msg_time > 5:
         VS.msg = ""
 
-    put(win, 0, 2, "VIDEO", cp(P_CYAN, bold=True))
+    def _trim(txt, n):
+        return txt if len(txt) <= n else txt[:max(0, n-1)] + "…"
+
+    put(win, 0, 2, "VIDEO PLAYER", cp(P_CYAN, bold=True))
     rname = VIDEO.renderer_name()
-    put(win, 0, 10, f"renderer: {rname}", cp(P_DIM))
+    ready = VIDEO.has_renderer()
+    rcol = P_GREEN if ready else P_RED
+    put(win, 0, max(2, W-28), f"ENGINE: {_trim(rname.upper(), 20)}", cp(rcol, bold=True))
+    mode_txt = "TERMINAL" if VIDEO.in_terminal else "WINDOW"
+    mode_col = P_CYAN if VIDEO.in_terminal else P_DIM
+    put(win, 0, max(2, W-45), f"MODE: {mode_txt}", cp(mode_col, bold=True))
+    ascii_txt = "ASCII" if VIDEO.prefer_ascii else "AUTO"
+    put(win, 0, max(2, W-58), f"RENDER: {ascii_txt}", cp(P_DIM, bold=True))
     put(win, 1, 0, "─"*W, cp(P_BOX))
 
-    CY = 2; CH = H - 5
-
-    status_txt = VIDEO.status
-    if status_txt:
-        scol = P_RED if ("error" in status_txt.lower() or "not found" in status_txt.lower()
-                         or "failed" in status_txt.lower()) else P_AMBER
-        centre(win, CY+1, status_txt[:W-4], cp(scol, bold=True))
+    hero_y = 2
+    hero_h = 10
+    hero_w = W - 4
+    box(win, hero_y, 2, hero_h, hero_w, "PLAYBACK")
 
     if VIDEO.playing:
-        centre(win, CY+3, "▶  NOW PLAYING", cp(P_GREEN, bold=True))
-        centre(win, CY+4, VIDEO.title, cp(P_HI, bold=True))
-        centre(win, CY+6, "playing in a separate window  ·  press S to stop", cp(P_DIM))
-    elif not VIDEO.status:
-        mid = CY + CH//2 - 3
-        if not VIDEO.has_renderer():
-            centre(win, mid,   "no video player found", cp(P_RED, bold=True))
-            centre(win, mid+1, "auto-installing mpv in background...", cp(P_AMBER))
-            centre(win, mid+2, "or: winget install mpv  /  brew install mpv", cp(P_DIM))
+        state = "NOW PLAYING"
+        state_col = P_GREEN
+        primary = VIDEO.title or "Untitled"
+        secondary = ("Rendering ASCII in terminal. Press S to stop."
+                     if VIDEO.ascii_mode else
+                     "Rendering inside terminal. Press S to stop."
+                     if VIDEO.in_terminal else
+                     "Playing in a separate window. Press S to stop.")
+    elif not ready:
+        state = "PLAYER SETUP"
+        state_col = P_AMBER
+        primary = "No renderer found. Trying auto-install in background."
+        secondary = "If needed: winget install mpv   or   brew install mpv"
+    elif VIDEO._installing:
+        state = "INSTALLING"
+        state_col = P_AMBER
+        primary = "Setting up mpv for better playback quality."
+        secondary = "You can still try ffplay fallback if available."
+    else:
+        state = "READY"
+        state_col = P_GREEN
+        primary = "Choose a source to start watching."
+        secondary = "Y for YouTube URL, O for local video file."
+
+    put(win, hero_y+1, 4, f"[{state}]", cp(state_col, bold=True))
+    put(win, hero_y+1, 20, f"Renderer: {_trim(rname, hero_w-26)}", cp(P_DIM))
+    put(win, hero_y+3, 4, _trim(primary, hero_w-6), cp(P_HI, bold=True))
+    put(win, hero_y+4, 4, _trim(secondary, hero_w-6), cp(P_DIM))
+
+    status_txt = VIDEO.status.strip()
+    if status_txt:
+        err = ("error" in status_txt.lower() or "failed" in status_txt.lower()
+               or "not found" in status_txt.lower())
+        put(win, hero_y+6, 4, _trim("Status: " + status_txt, hero_w-6), cp(P_RED if err else P_CYAN))
+
+    put(win, hero_y+8, 4, "Flow: 1) Pick source  2) Paste path/URL  3) Enter to launch", cp(P_DIM))
+
+    act_y = hero_y + hero_h
+    act_h = max(6, H - act_y - 3)
+    if act_h >= 6:
+        if VIDEO.playing and VIDEO.ascii_mode:
+            box(win, act_y, 2, act_h, hero_w, "ASCII PREVIEW")
+            drawable_h = max(1, act_h - 2)
+            drawable_w = max(8, hero_w - 3)
+            VIDEO.set_ascii_viewport(drawable_w, drawable_h)
+            lines = VIDEO.get_ascii_frame()
+            for i in range(min(drawable_h, len(lines))):
+                put(win, act_y + 1 + i, 3, lines[i][:drawable_w], cp(P_HI))
         else:
-            centre(win, mid,   f"player ready: {VIDEO.renderer_name()}", cp(P_GREEN))
-            centre(win, mid+2, "Y · YouTube URL    O · open file", cp(P_DIM))
+            box(win, act_y, 2, act_h, hero_w, "QUICK ACTIONS")
+            put(win, act_y+1, 4, "Y  YouTube URL", cp(P_HI, bold=True))
+            put(win, act_y+2, 4, "O  Open local file", cp(P_HI, bold=True))
+            put(win, act_y+3, 4, "S  Stop playback", cp(P_HI, bold=True))
+            put(win, act_y+4, 4, "T  Toggle terminal/window mode", cp(P_HI, bold=True))
+            put(win, act_y+5, 4, "A  Toggle ASCII renderer", cp(P_HI, bold=True))
+            put(win, act_y+1, hero_w//2, "Supports: mp4 mkv mov avi webm", cp(P_DIM))
+            put(win, act_y+2, hero_w//2, "YouTube: youtube.com or youtu.be links", cp(P_DIM))
+            put(win, act_y+3, hero_w//2, "Tip: use absolute paths for local files", cp(P_DIM))
+            put(win, act_y+4, hero_w//2, "Windows: tct may fail, ASCII fallback is used", cp(P_DIM))
+            put(win, act_y+5, hero_w//2, "ASCII playback is terminal-only and no-audio", cp(P_DIM))
 
     blink = "▌" if int(time.time()*2)%2 else " "
     if VS.mode in ("add_url", "add_file"):
-        ow = min(W-8, 64); ox = (W-ow)//2; oy = H//2 - 4
-        for r in range(oy, oy+9):
+        ow = min(W-8, 76); ox = (W-ow)//2; oy = H//2 - 4
+        box(win, oy, ox, 9, ow, "INPUT")
+        for r in range(oy+1, oy+8):
             try: win.move(r, ox); win.clrtoeol()
             except: pass
         label = "play youtube url" if VS.mode == "add_url" else "open video file"
-        put(win, oy,   ox+2, label,           cp(P_CYAN, bold=True))
-        put(win, oy+1, ox+2, "─"*(ow-4),      cp(P_BOX))
+        put(win, oy+1, ox+2, label.upper(),     cp(P_CYAN, bold=True))
+        put(win, oy+2, ox+2, "─"*(ow-4),       cp(P_BOX))
         if VS.mode == "add_url":
-            put(win, oy+2, ox+2, "youtube.com/watch?v=...  or  youtu.be/...", cp(P_DIM))
+            put(win, oy+3, ox+2, "youtube.com/watch?v=...  or  youtu.be/...", cp(P_DIM))
         else:
-            put(win, oy+2, ox+2, "full path to video file  (mp4 mkv avi mov webm)", cp(P_DIM))
-        put(win, oy+4, ox+2, f"{VS.buf}{blink}", cp(P_HI, bold=True))
+            put(win, oy+3, ox+2, "full path to video file  (mp4 mkv avi mov webm)", cp(P_DIM))
+        put(win, oy+5, ox+2, _trim(f"{VS.buf}{blink}", ow-4), cp(P_HI, bold=True))
         put(win, oy+6, ox+2, "─"*(ow-4), cp(P_BOX))
-        put(win, oy+7, ox+2, "enter · play    esc · cancel", cp(P_DIM))
+        put(win, oy+7, ox+2, "enter = play    esc = cancel", cp(P_DIM))
 
     if VS.msg:
         mcol = P_RED if "error" in VS.msg.lower() else P_GREEN
         put(win, H-2, 2, VS.msg[:W-4], cp(mcol, bold=True))
 
     put(win, H-1, 0,
-        " O · open file    Y · YouTube    S · stop    ←→ · views ",
+        " O open file  Y YouTube  S stop  T terminal/window  A ascii  K force-stop ",
         cp(P_DIM))
 
 
@@ -3768,6 +4533,27 @@ def _handle_mouse():
                     return
 
 
+def _force_stop_all_media():
+    """Emergency kill switch for stuck audio/video playback."""
+    try:
+        VIDEO.stop()
+    except Exception:
+        pass
+    try:
+        AUDIO._kill()
+    except Exception:
+        pass
+    if platform.system() == "Windows":
+        for exe in ("mpv.exe", "ffplay.exe", "mplayer.exe", "aplay.exe"):
+            try:
+                subprocess.run(["taskkill", "/IM", exe, "/T", "/F"],
+                               capture_output=True, timeout=3)
+            except Exception:
+                pass
+    VS.msg = "FORCE STOPPED all media"
+    VS.msg_time = time.time()
+
+
 def handle_key(k):
     if k == curses.KEY_MOUSE:
         _handle_mouse()
@@ -3777,8 +4563,8 @@ def handle_key(k):
     # Check if ANY input mode is active - if so, ONLY handle input-specific keys
     # This prevents shortcuts from interfering with text input
     input_mode_active = (ST.todo_add or 
-                         (v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode)) or 
-                         (v == 5 and LS.mode in ("add_url", "add_file")) or 
+                         (v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode)) or 
+                         (v in (1, 5) and LS.mode in ("add_url", "add_file")) or 
                          (v == 7 and VS.mode in ("add_url", "add_file")) or 
                          (v == 8 and NSS.stock_input) or
                          ECS.input_mode)
@@ -3799,11 +4585,11 @@ def handle_key(k):
             ST.todo_buf = _text_input(ST.todo_buf, k)
         return
 
-    if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode):
+    if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode):
         _handle_cal_input(k)
         return
 
-    if v == 5 and LS.mode in ("add_url", "add_file"):
+    if v in (1, 5) and LS.mode in ("add_url", "add_file"):
         if k in (10, 13):
             t = LS.buf.strip()
             if t:
@@ -3842,7 +4628,7 @@ def handle_key(k):
         return
 
     # Crypto/ETF ticker input - protect it completely
-    if ECS.input_mode:
+    if v == 10 and ECS.input_mode:
         if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
             ECS.input_buf = ECS.input_buf[:-1]
         elif k == 27:
@@ -3862,7 +4648,7 @@ def handle_key(k):
         return
 
     # Portfolio stock ticker input - protect it completely
-    if v == 8 and NSS.stock_input:
+    if v == 9 and NSS.stock_input:
         if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
             NSS.stock_buf = NSS.stock_buf[:-1]
         elif k == 27:
@@ -3896,6 +4682,16 @@ def handle_key(k):
 
     # Global shortcuts (only when NOT in input mode)
     if not input_mode_active:
+        if k == 27:
+            # Page-wise back behavior: only return from shortcut-only pages
+            # to the page they were opened from. Otherwise ESC is local/no-op.
+            if v in (9, 10) and ST.return_view is not None:
+                ST.view = ST.return_view
+                ST.return_view = None
+            return
+        if k in (11, ord('K')):
+            _force_stop_all_media()
+            return
         if k == ord(' ') and v != 0: AUDIO.toggle_play(); return
         if k in (ord('z'), ord('Z')):             AUDIO.prev_track();  return
         if k in (ord('x'), ord('X')):             AUDIO.next_track();  return
@@ -3929,23 +4725,63 @@ def handle_key(k):
                 ST.pomo_secs  = ST.pomo_total; ST._pw = time.time()
             elif k == ord('f'): ST.focus_idx = (ST.focus_idx+1) % len(ST.focus_modes)
 
-        elif v == 5:
+        elif v in (1, 5):
             if LS.mode == "browse":
-                if k in (curses.KEY_UP,   ord('k')): LS.cursor = max(0, LS.cursor-1)
-                elif k in (curses.KEY_DOWN, ord('j')): LS.cursor = min(len(AUDIO.library)-1, LS.cursor+1)
-                elif k in (10, 13): AUDIO.play_index(LS.cursor)
+                idxs = _lib_filtered_indices()
+                if k == ord('1'):
+                    LS.filter = "all"
+                    idxs = _lib_filtered_indices()
+                    if idxs: LS.cursor = idxs[0]
+                elif k == ord('2'):
+                    LS.filter = "builtin"
+                    idxs = _lib_filtered_indices()
+                    if idxs: LS.cursor = idxs[0]
+                elif k == ord('3'):
+                    LS.filter = "youtube"
+                    idxs = _lib_filtered_indices()
+                    if idxs: LS.cursor = idxs[0]
+                elif k == ord('4'):
+                    LS.filter = "file"
+                    idxs = _lib_filtered_indices()
+                    if idxs: LS.cursor = idxs[0]
+                elif k in (curses.KEY_UP, ord('k')):
+                    if idxs:
+                        if LS.cursor not in idxs:
+                            LS.cursor = idxs[0]
+                        else:
+                            pos = idxs.index(LS.cursor)
+                            LS.cursor = idxs[(pos - 1) % len(idxs)]
+                elif k in (curses.KEY_DOWN, ord('j')):
+                    if idxs:
+                        if LS.cursor not in idxs:
+                            LS.cursor = idxs[0]
+                        else:
+                            pos = idxs.index(LS.cursor)
+                            LS.cursor = idxs[(pos + 1) % len(idxs)]
+                elif k in (10, 13):
+                    if idxs:
+                        if LS.cursor not in idxs:
+                            LS.cursor = idxs[0]
+                        AUDIO.play_index(LS.cursor)
                 elif k == ord('Y'): LS.mode = "add_url";  LS.buf = ""
                 elif k == ord('F'): LS.mode = "add_file"; LS.buf = ""
                 elif k == ord('D'):
-                    if LS.cursor >= len(BUILTIN_TRACKS):
+                    if idxs and LS.cursor not in idxs:
+                        LS.cursor = idxs[0]
+                    if idxs and LS.cursor >= len(BUILTIN_TRACKS):
                         LS.mode = "confirm_del"
                     else:
-                        LS.msg = "Cannot remove built-in tracks"; LS.msg_time = time.time()
+                        LS.msg = "Cannot remove built-in tracks" if idxs else "No tracks in this filter"
+                        LS.msg_time = time.time()
             elif LS.mode == "confirm_del":
                 if k in (ord('y'), ord('Y')):
                     ok, msg = AUDIO.remove_track(LS.cursor)
                     LS.msg = msg; LS.msg_time = time.time()
-                    LS.cursor = max(0, min(LS.cursor, len(AUDIO.library)-1))
+                    idxs = _lib_filtered_indices()
+                    if idxs:
+                        LS.cursor = idxs[min(len(idxs)-1, 0)]
+                    else:
+                        LS.cursor = 0
                     LS.mode   = "browse"
                 elif k in (ord('n'), ord('N'), 27):
                     LS.mode = "browse"
@@ -3985,32 +4821,54 @@ def handle_key(k):
                 CS.add_mode = True; CS.add_step = 0
                 CS.add_date = CS.date; CS.add_hour = 9
                 CS.add_min  = 0;       CS.add_title = ""
-            elif k == ord('d'):
-                evs = _evs_for_day(CS.date)
-                if evs and 0 <= CS.cur_ev < len(evs):
-                    s, e, t = evs[CS.cur_ev]
-                    for li, lev in enumerate(CS.local_evs):
-                        if (lev.get("title") == t and
-                                lev.get("dt","").startswith(s.strftime("%Y-%m-%d"))):
-                            CS.del_idx = li; CS.del_mode = True; break
-                    else:
-                        CS.msg = "ICS events cannot be deleted here"; CS.msg_time = time.time()
             elif k == ord('G'):
-                CS.ics_mode = True; CS.ics_buf = ""
+                CS.ics_mode = True; CS.ics_buf = ""; CS.ics_step = 0; CS.ics_name_buf = ""
+            elif k == ord('D'):
+                if get_connected_ics_count() == 0:
+                    CS.msg = "No connected calendar"; CS.msg_time = time.time()
+                else:
+                    CS.ics_sel_mode = True
+                    CS.ics_sel_idx = 0
             elif k == ord('r'):
                 threading.Thread(target=refresh_calendar, daemon=True).start()
                 CS.msg = "Refreshing..."; CS.msg_time = time.time()
 
         elif v == 7:
-            if k == ord('Y'):   VS.mode = "add_url";  VS.buf = ""
-            elif k == ord('O'): VS.mode = "add_file"; VS.buf = ""
-            elif k == ord('S'):
+            if k in (ord('y'), ord('Y')):   VS.mode = "add_url";  VS.buf = ""
+            elif k in (ord('o'), ord('O')): VS.mode = "add_file"; VS.buf = ""
+            elif k in (ord('s'), ord('S')):
                 VIDEO.stop()
                 VS.msg = "stopped"; VS.msg_time = time.time()
+            elif k in (ord('t'), ord('T')):
+                now_term = VIDEO.toggle_terminal_mode()
+                VS.msg = ("video mode: terminal" if now_term else "video mode: popup window")
+                VS.msg_time = time.time()
+            elif k in (ord('a'), ord('A')):
+                now_ascii = VIDEO.toggle_ascii_preference()
+                VS.msg = ("renderer: ASCII preferred" if now_ascii else "renderer: auto (mpv/tct first)")
+                VS.msg_time = time.time()
 
         elif v == 8:
-            _handle_news_stocks_key(k)
+            # News & Market Hub shortcuts
+            if k == ord('1'):
+                ST.return_view = 8
+                ST.view = 9  # Jump to NEWS & STOCKS
+            elif k == ord('2'):
+                ST.return_view = 8
+                ST.view = 9  # Jump to NEWS & STOCKS (portfolio view)
+                NSS.tab = 1
+            elif k == ord('3'):
+                ST.return_view = 8
+                ST.view = 10  # Jump to ETF · CRYPTO
+            elif k == ord('r'):
+                # Refresh all market data
+                threading.Thread(target=fetch_etf_bg, daemon=True).start()
+                threading.Thread(target=fetch_crypto_bg, daemon=True).start()
+                threading.Thread(target=fetch_market_bg, daemon=True).start()
+                threading.Thread(target=fetch_news_bg, daemon=True).start()
         elif v == 9:
+            _handle_news_stocks_key(k)
+        elif v == 10:
             _handle_etf_crypto_key(k)
 
 
@@ -4884,6 +5742,185 @@ def _init_nss_country():
 
 _init_nss_country()
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CONSOLIDATED NEWS & MARKET HUB — Market Pulse + Top Mover + Headlines
+# ══════════════════════════════════════════════════════════════════════════════
+def v_news_market_hub(win, W, H):
+    """Apple-inspired composition for the News & Market Hub."""
+    news_items  = get_news_items()
+    market_data = get_market_data()
+    etf_data    = get_etf_data()
+    crypto_data = get_crypto_data()
+    stock_data  = get_stock_data()
+    all_assets  = {**market_data, **etf_data, **crypto_data, **stock_data}
+
+    code = get_user_country() or "GLOBAL"
+    info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
+    flag = info["flag"]; cname = info["name"]
+    country_cur = info.get("currency", "USD")
+
+    # Build a country-specific symbol universe for dashboard cards.
+    country_defaults = [s.upper() for s in info.get("stocks", [])]
+    country_market   = [s.upper() for s in get_market_symbols_for_country(code)]
+    country_universe = set(country_defaults + country_market)
+    country_assets   = {sym: v for sym, v in all_assets.items() if sym.upper() in country_universe}
+
+    # Currency symbol for country-wise display.
+    cur_map = {
+        "USD":"$","EUR":"€","GBP":"£","JPY":"¥","INR":"₹","CNY":"¥",
+        "KRW":"₩","AUD":"A$","CAD":"C$","SGD":"S$","BRL":"R$",
+        "ZAR":"R","AED":"د.إ","NGN":"₦","MXN":"$","HKD":"HK$",
+    }
+    cur_sym = cur_map.get(country_cur, country_cur + " ")
+
+    if W < 92 or H < 28:
+        centre(win, H // 2 - 1, "News & Market Hub looks best at 92x28+", cp(P_AMBER, bold=True))
+        centre(win, H // 2, "Resize terminal for premium card layout", cp(P_DIM))
+        put(win, H - 1, 2, "[1] news  [2] stocks  [3] etf  [r] refresh  [←→] views", cp(P_DIM))
+        return
+
+    put(win, 1, 0, "─" * W, cp(P_BOX))
+    put(win, 2, 2, " NEWS & MARKET HUB ", cp(P_CYAN, bold=True) | curses.A_BOLD)
+    put(win, 2, W - 35, f"{flag} {cname}  ·  live market board", cp(P_DIM))
+    put(win, 3, 0, "─" * W, cp(P_BOX))
+
+    gutter = 2
+    frame_x = 1
+    frame_w = W - 2
+    top_y = 4
+    top_h = 10
+    left_w = (frame_w - gutter) // 2
+    right_w = frame_w - gutter - left_w
+    left_x = frame_x
+    right_x = left_x + left_w + gutter
+
+    bottom_y = top_y + top_h + 1
+    bottom_h = H - bottom_y - 3
+
+    _draw_cell_market_pulse(win, top_y, left_x, left_w, top_h,
+                            country_assets, country_defaults, country_market,
+                            cur_sym, cname)
+    _draw_cell_top_mover(win, top_y, right_x, right_w, top_h, country_assets, cur_sym, cname)
+    _draw_cell_headlines(win, bottom_y, frame_x, frame_w, bottom_h, news_items)
+
+    put(win, H - 2, 0, "─" * W, cp(P_BOX))
+    put(win, H - 1, 2,
+        "[1] all news   [2] stocks board   [3] etf/crypto deck   [r] refresh everything   [←→] views   [q] quit",
+        cp(P_DIM))
+
+
+def _draw_cell_market_pulse(win, y, x, w, h, country_assets, country_defaults, country_market, cur_sym, cname):
+    """Cell A: compact pulse board with two anchors and momentum bars."""
+    box(win, y, x, h, w, " MARKET PULSE ")
+
+    preferred = [s for s in country_defaults if s in country_assets]
+    picks = []
+    for sym in preferred:
+        info = country_assets.get(sym)
+        if info:
+            picks.append((sym, info))
+        if len(picks) >= 2:
+            break
+
+    if len(picks) < 2:
+        fallback = [(s, country_assets[s]) for s in country_market if s in country_assets]
+        fallback.sort(key=lambda kv: abs(kv[1].get("pct", 0)), reverse=True)
+        for sym, info in fallback:
+            if sym not in [s for s, _ in picks]:
+                picks.append((sym, info))
+            if len(picks) >= 2:
+                break
+
+    if not picks:
+        put(win, y + 3, x + 3, "Waiting for market feed...", cp(P_AMBER))
+        return
+
+    put(win, y + 1, x + 2, f"{cname} benchmarks", cp(P_DIM))
+    row = y + 2
+    for sym, info in picks[:2]:
+        pct = info.get("pct", 0.0)
+        price = info.get("price", 0.0)
+        col = P_GREEN if pct > 0 else (P_RED if pct < 0 else P_MID)
+        arrow = "▲" if pct > 0 else ("▼" if pct < 0 else "•")
+        label = f"{sym:<10} {cur_sym}{price:>8.2f} {arrow}{pct:+6.2f}%"
+        put(win, row, x + 2, label[:w - 4], cp(col, bold=True))
+        bar_w = max(8, w - 24)
+        hbar(win, row, x + w - bar_w - 3, bar_w, min(100, abs(pct) * 11), col)
+        row += 2
+
+    up = sum(1 for _, i in country_assets.items() if i.get("pct", 0) > 0)
+    dn = sum(1 for _, i in country_assets.items() if i.get("pct", 0) < 0)
+    pulse = f"Breadth  {up:02d} up  /  {dn:02d} down"
+    put(win, y + h - 2, x + 2, pulse[:w - 4], cp(P_CYAN))
+
+
+def _draw_cell_top_mover(win, y, x, w, h, all_assets, cur_sym, cname):
+    """Cell B: hero card for the strongest mover right now."""
+    box(win, y, x, h, w, " TOP MOVER ")
+
+    if not all_assets:
+        put(win, y + 2, x + 3, f"No {cname} market data", cp(P_AMBER))
+        return
+
+    ranked = sorted(all_assets.items(), key=lambda kv: abs(kv[1].get("pct", 0)), reverse=True)
+    sym, info = ranked[0]
+    pct = info.get("pct", 0.0)
+    chg = info.get("change", 0.0)
+    px = info.get("price", 0.0)
+    name = info.get("name", sym)
+
+    col = P_GREEN if pct > 0 else (P_RED if pct < 0 else P_MID)
+    mood = "Breakout" if pct > 0 else ("Selloff" if pct < 0 else "Flat")
+
+    put(win, y + 1, x + 2, f"{cname} {mood.lower()} leader", cp(P_DIM))
+    put(win, y + 2, x + 2, f"{sym}"[:w - 4], cp(P_HI, bold=True) | curses.A_BOLD)
+    put(win, y + 3, x + 2, name[:w - 4], cp(P_MID))
+    put(win, y + 5, x + 2, f"{cur_sym}{px:,.2f}", cp(P_HI, bold=True))
+    put(win, y + 6, x + 2, f"{chg:+.2f}   ({pct:+.2f}%)", cp(col, bold=True))
+
+    if len(ranked) > 1:
+        s2, i2 = ranked[1]
+        p2 = i2.get("pct", 0.0)
+        c2 = P_GREEN if p2 > 0 else (P_RED if p2 < 0 else P_MID)
+        put(win, y + h - 2, x + 2, f"Next: {s2} {p2:+.2f}%"[:w - 4], cp(c2))
+
+
+def _draw_cell_headlines(win, y, x, w, h, news_items):
+    """Cell C: stable base card with headline hero."""
+    box(win, y, x, h, w, " HEADLINE OF THE MOMENT ")
+
+    if not news_items:
+        put(win, y + 2, x + 2, "No headlines yet. Check connection.", cp(P_AMBER))
+        return
+
+    top = news_items[0]
+    title = (top.get("title") or "No title").strip()
+    source = top.get("source", "Unknown")
+    ts = top.get("time", "")
+    url = top.get("url", "")
+
+    title_1 = title[:w - 6]
+    title_2 = title[w - 6:(w - 6) * 2]
+    put(win, y + 2, x + 2, title_1, cp(P_HI, bold=True))
+    if title_2:
+        put(win, y + 3, x + 2, title_2, cp(P_HI, bold=True))
+
+    meta = f"{source}  •  {ts}"
+    put(win, y + 4, x + 2, meta[:w - 4], cp(P_CYAN))
+    if url:
+        put(win, y + 5, x + 2, "Press ENTER in News view to open full story", cp(P_DIM))
+
+    row = y + 7
+    put(win, row, x + 2, "More headlines", cp(P_DIM))
+    row += 1
+    for i in range(1, min(4, len(news_items))):
+        if row >= y + h - 3:
+            break
+        item = news_items[i]
+        line = f"• {(item.get('title') or '')[:w - 10]}"
+        put(win, row, x + 3, line, cp(P_MID))
+        row += 1
 
 def v_news_stocks(win, W, H):
     # ── First-run country setup ───────────────────────────────────────────────
@@ -5838,18 +6875,18 @@ def _fetch_and_cache_ec(sym):
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 VIEW_FNS = [v_dashboard, v_clock, v_focus, v_neofetch, v_network,
-            v_library, v_calendar, v_video, v_news_stocks, v_etf_crypto]
+            v_library, v_calendar, v_video, v_news_market_hub, v_news_stocks, v_etf_crypto]
 
 def _in_text_input_mode():
     v = ST.view
     if ST.todo_add:                                              return True
-    if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode):  return True
-    if v == 5 and LS.mode in ("add_url", "add_file"):            return True
+    if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode):  return True
+    if v in (1, 5) and LS.mode in ("add_url", "add_file"):       return True
     if v == 7 and VS.mode in ("add_url", "add_file"):            return True
-    if v == 8 and NSS.stock_input:                               return True
-    if v == 8 and NSS.country_mode:                              return True
-    if v == 8 and not get_user_country():                        return True  # first-run picker
-    if v == 9 and ECS.input_mode:                                  return True
+    if v == 9 and NSS.stock_input:                               return True
+    if v == 9 and NSS.country_mode:                              return True
+    if v == 9 and not get_user_country():                        return True  # first-run picker
+    if v == 10 and ECS.input_mode:                               return True
     return False
 
 
@@ -5894,6 +6931,7 @@ def main(stdscr):
             if k == -1:
                 break
             if k == ord('q') and not in_text:
+                VIDEO.stop()
                 AUDIO._kill()
                 save_todos(ST.todos)
                 return
