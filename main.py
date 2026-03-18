@@ -2746,8 +2746,22 @@ def draw_spectrum(win, y, x, h, w, spectrum, col_low=P_CYAN, col_mid=P_BLUE, col
 # ══════════════════════════════════════════════════════════════════════════════
 #  APP STATE
 # ══════════════════════════════════════════════════════════════════════════════
-VIEWS = ["DASHBOARD","MUSIC + LIBRARY","FOCUS","NEOFETCH","NETWORK","LIBRARY","CALENDAR","VIDEO","NEWS & MARKET HUB"]
-ALL_VIEW_NAMES = VIEWS + ["NEWS & STOCKS", "ETF · CRYPTO"]
+VIEWS = ["DASHBOARD","MUSIC + LIBRARY","FOCUS","NEOFETCH","NETWORK","CALENDAR","VIDEO","NEWS & MARKET HUB","NEWS & STOCKS","ETF · CRYPTO"]
+ALL_VIEW_NAMES = VIEWS
+
+HUB_VIEW_IDX = 7
+NEWS_STOCKS_VIEW_IDX = 8
+ETF_CRYPTO_VIEW_IDX = 9
+SHORTCUT_ONLY_VIEWS = {NEWS_STOCKS_VIEW_IDX, ETF_CRYPTO_VIEW_IDX}
+NAV_CYCLE_VIEWS = [0, 1, 2, 3, 4, 5, 6, HUB_VIEW_IDX]
+
+
+def _cycle_view(cur, step):
+    """Cycle through primary views only; shortcut-only views are excluded."""
+    if cur not in NAV_CYCLE_VIEWS:
+        cur = HUB_VIEW_IDX
+    pos = NAV_CYCLE_VIEWS.index(cur)
+    return NAV_CYCLE_VIEWS[(pos + step) % len(NAV_CYCLE_VIEWS)]
 
 class State:
     def __init__(self):
@@ -2813,146 +2827,120 @@ def v_dashboard(win, W, H):
     now = datetime.datetime.now()
     sd  = SD.snap()
 
-    # ── Column setup ──────────────────────────────────────────────────────────
+    def _clip(s, n):
+        return s if len(s) <= n else s[:max(1, n-1)] + "…"
+
+    # Compact fallback for very small terminals.
+    if W < 90 or H < 26:
+        v_clock(win, W, H)
+        return
+
+    # Balanced geometry with larger visualizer area.
     lw = W // 2
     rw = W - lw - 1
-
-    # ── Top row: Clock (left) + Upcoming events (right) ──────────────────────
     top_h = 9
-    box(win, 1, 0, top_h, lw, "CLOCK")
+    body_h = 11
+    gap = 1
+
+    # ── Top full-width: Clock + top news + next upcoming event ──────────────
+    box(win, 1, 0, top_h, W - 1, "CLOCK + NEXT UPCOMING EVENT")
+
+    split_x = lw
+    for yy in range(2, top_h):
+        put(win, yy, split_x, "│", cp(P_BOX))
+
+    left_w = max(10, lw - 4)
+    right_w = max(10, rw - 4)
+
     ts = now.strftime("%H:%M")
     big_time(win, 2, max(1, (lw - btw(ts)) // 2), ts)
-    put(win, 7, 2, now.strftime("%A, %b %d").upper(), cp(P_DIM))
+    put(win, 6, 2, now.strftime("%A, %b %d").upper(), cp(P_DIM))
 
-    box(win, 1, lw, top_h, rw, "UPCOMING EVENTS")
+    bat = sd.get("bat_pct", 0)
+    cpu = sd.get("cpu", 0.0)
+    mem = sd.get("mem_pct", 0.0)
+    disk = sd.get("disk_pct", 0.0)
+
+    evtitle, evtime = next_event()
+    ev_date = "No upcoming date"
     with _CAL_LOCK:
         evs = list(_CAL_EVENTS)
-    upcoming = []
     for start, end, title in evs:
-        if end < now:
-            continue
-        if start <= now <= end:
-            when = "NOW"
-        else:
-            when = start.strftime("%a %H:%M")
-        upcoming.append((when, title))
-        if len(upcoming) >= 3:
+        if end >= now:
+            ev_date = start.strftime("%a, %b %d")
+            if start <= now <= end:
+                evtime = "ongoing"
             break
-    while len(upcoming) < 3:
-        if len(upcoming) == 0:
-            upcoming.append(("--", "No calendar events"))
-        elif len(upcoming) == 1:
-            upcoming.append(("TIP", "Press → to open Calendar"))
-        else:
-            upcoming.append(("TIP", "Add events to see here"))
-    for i, (when, title) in enumerate(upcoming[:3]):
-        yy = 2 + i * 2
-        put(win, yy, lw + 2, f"{when:>8}", cp(P_CYAN, bold=True))
-        put(win, yy, lw + 12, title[:max(8, rw - 14)], cp(P_HI if i == 0 else P_MID))
 
-    # ── Lower area: left = todos/pomodoro/visualizer, right = news/system ────
-    col_y = 11
-    col_h = max(10, H - col_y - 1)
-
-    # Left stack sizing
-    pomo_h = 5
-    todo_h = max(6, min(col_h - 7, col_h // 2))
-    vis_box_h = col_h - todo_h - pomo_h - 2
-    if vis_box_h < 4:
-        shrink = 4 - vis_box_h
-        todo_h = max(6, todo_h - shrink)
-        vis_box_h = col_h - todo_h - pomo_h - 2
-
-    # ── TODOS (left/top) ─────────────────────────────────────────────────────
-    todo_inner = max(2, todo_h - 2 - (1 if ST.todo_add else 0))
-    todo_box_h = todo_inner + 2 + (1 if ST.todo_add else 0)
-    box(win, col_y, 0, todo_box_h, lw, "TODOS  [a]=add  [d]=del  [ENTER]=check")
-    start = max(0, ST.todo_cur - todo_inner + 1) if len(ST.todos) > todo_inner else 0
-    for i, (done, text) in enumerate(ST.todos[start:start + todo_inner]):
-        ri = start + i
-        ry = col_y + 1 + i
-        sel = (ri == ST.todo_cur)
-        put(win, ry, 1, " " * (lw - 2), cp(P_DIM) | (curses.A_REVERSE if sel else 0))
-        tick_c = "✓" if done else " "
-        col = P_DIM if done else (P_AMBER if sel else P_HI)
-        line = f" {'▶' if sel else ' '} [{tick_c}] {text}"
-        put(win, ry, 1, line[:lw - 2], cp(col) | (curses.A_REVERSE if sel else 0))
-    if len(ST.todos) > todo_inner:
-        put(win, col_y + 1, lw - 8, f"{ST.todo_cur+1}/{len(ST.todos)}", cp(P_DIM))
-    if ST.todo_add:
-        put(win, col_y + 1 + todo_inner, 2,
-            f" + {ST.todo_buf}{'█' if int(time.time()*2)%2 else ' '}", cp(P_AMBER))
-
-    # ── POMODORO (left/middle) ───────────────────────────────────────────────
-    py = col_y + todo_box_h + 1
-    box(win, py, 0, pomo_h, lw, "POMODORO  [p]=start  [r]=reset")
-    pm = int(ST.pomo_secs) // 60
-    ps = int(ST.pomo_secs) % 60
-    pct = int((1 - ST.pomo_secs / max(1, ST.pomo_total)) * 100)
-    pc = P_RED if ST.pomo_phase == "WORK" else P_GREEN
-    sym2 = "▶" if ST.pomo_run else "||"
-    put(win, py + 1, 2, f" {sym2}  {pm:02d}:{ps:02d}  {ST.pomo_phase}", cp(pc, bold=True))
-    hbar(win, py + 2, 2, max(4, lw - 4), pct, pc)
-    dots = " ".join("◉" if i < ST.pomo_done else "○" for i in range(8))
-    put(win, py + 3, 2, dots[:max(1, lw - 4)], cp(P_DIM))
-
-    # ── VISUALIZER (left/bottom) ─────────────────────────────────────────────
-    vy = py + pomo_h + 1
-    if vis_box_h >= 4 and vy + vis_box_h - 1 < H - 1:
-        td = AUDIO.current
-        lbl = f"VISUALIZER  ~ {td['name'][:28]} — {td['artist']}"
-        box(win, vy, 0, vis_box_h, lw, lbl)
-        vis_h = max(2, vis_box_h - 2)
-        draw_spectrum(win, vy + 1, 1, vis_h, max(4, lw - 3), list(ST._spec_smooth))
-
-    # Right stack sizing
-    news_h = max(7, min(col_h - 7, (col_h * 2) // 3))
-    sys_h = col_h - news_h - 1
-    if sys_h < 6:
-        news_h = max(7, news_h - (6 - sys_h))
-        sys_h = col_h - news_h - 1
-
-    # ── NEWS (right/top) ─────────────────────────────────────────────────────
-    code = get_user_country() or "GLOBAL"
-    c_info = COUNTRY_DB.get(code, COUNTRY_DB["GLOBAL"])
-    flag = c_info["flag"]
     items = get_news_items()
-    box(win, col_y, lw, news_h, rw, f"NEWS {flag} [→ view 9]")
-    news_rows = max(1, news_h - 2)
-    for i, item in enumerate(items[:news_rows]):
-        ny = col_y + 1 + i
-        if ny >= col_y + news_h - 1:
-            break
-        src = f"[{item['source'][:6]}]"
-        line = f"{src} {item['title']}"
-        put(win, ny, lw + 2, line[:max(8, rw - 3)], cp(P_HI if i == 0 else P_MID))
+    top_news = items[0].get("title", "No news available") if items else "No news available"
+    put(win, 2, lw + 2, "TOP NEWS", cp(P_CYAN, bold=True))
+    put(win, 3, lw + 2, _clip(top_news, right_w), cp(P_HI))
+    put(win, 5, lw + 2, "NEXT EVENT", cp(P_CYAN, bold=True))
+    put(win, 6, lw + 2, _clip(evtitle, right_w), cp(P_MID))
+    put(win, 7, lw + 2, _clip(f"{ev_date}  |  {evtime}", right_w), cp(P_DIM))
 
-    # ── SYSTEM INFO (right/bottom) ───────────────────────────────────────────
-    sy = col_y + news_h + 1
-    if sys_h >= 6 and sy + sys_h - 1 < H - 1:
-        box(win, sy, lw, sys_h, rw, "SYSTEM INFO")
-        bat = sd["bat_pct"]
-        plug = sd["bat_plug"]
-        bc = P_GREEN if bat > 40 else (P_AMBER if bat > 15 else P_RED)
-        bw = max(4, rw - 15)
-        uh, rem = divmod(sd["uptime"], 3600)
-        um = rem // 60
-        put(win, sy + 1, lw + 2, f"BAT {'+' if plug else ' '}{bat:3d}%", cp(bc, bold=True))
-        hbar(win, sy + 1, lw + 12, bw, bat, bc)
-        put(win, sy + 2, lw + 2, f"CPU  {sd['cpu']:5.1f}%", cp(P_CYAN))
-        hbar(win, sy + 2, lw + 12, bw, int(sd["cpu"]), P_CYAN)
-        put(win, sy + 3, lw + 2, f"MEM  {sd['mem_pct']:5.1f}%", cp(P_BLUE))
-        hbar(win, sy + 3, lw + 12, bw, int(sd["mem_pct"]), P_BLUE)
-        if sys_h >= 7:
-            put(win, sy + 4, lw + 2, f"UP   {uh}h {um:02d}m", cp(P_DIM))
-        if sys_h >= 8:
-            put(win, sy + 5, lw + 2, f"NET  {sd['ssid'][:max(1, rw - 8)]}", cp(P_DIM))
-        if sys_h >= 9:
-            put(win, sy + 6, lw + 2,
-                f"I/O  ↓{kbfmt(sd['net_dn'])} ↑{kbfmt(sd['net_up'])}", cp(P_DIM))
+    # ── Middle body: To-Dos (left, full) | System Info (right, full) ───────
+    y1 = 1 + top_h + gap
+    box(win, y1, 0, body_h, lw, "TO-DOS")
+
+    # Input line anchored near the top while adding a task.
+    list_start_y = y1 + 1
+    if ST.todo_add:
+        put(win, y1 + 1, 2,
+            _clip(f"+ {ST.todo_buf}{'█' if int(time.time()*2)%2 else ' '}", max(8, lw - 4)), cp(P_AMBER))
+        list_start_y = y1 + 2
+
+    list_rows = max(2, (y1 + body_h - 2) - list_start_y + 1)
+    start = max(0, ST.todo_cur - list_rows + 1) if len(ST.todos) > list_rows else 0
+    for i, (done, text) in enumerate(ST.todos[start:start + list_rows]):
+        ri = start + i
+        yy = list_start_y + i
+        if yy >= y1 + body_h - 1:
+            break
+        sel = (ri == ST.todo_cur)
+        tick = "✓" if done else " "
+        col = P_DIM if done else (P_AMBER if sel else P_HI)
+        line = f" [{'▶' if sel else ' '}] [{tick}] {_clip(text, max(8, lw - 12))}"
+        put(win, yy, 2, line[:max(1, lw - 4)], cp(col))
+
+    done_n = sum(1 for d, _ in ST.todos if d)
+    put(win, y1 + body_h - 2, 2,
+        _clip(f"Done {done_n}/{len(ST.todos)}", max(8, lw - 4)), cp(P_DIM))
+
+    box(win, y1, lw, body_h, rw, "SYSTEM INFO")
+    plug = sd.get("bat_plug", False)
+    bc = P_GREEN if bat > 40 else (P_AMBER if bat > 15 else P_RED)
+    bw = max(4, rw - 15)
+    uh, rem = divmod(int(sd.get("uptime", 0)), 3600)
+    um = rem // 60
+
+    put(win, y1 + 1, lw + 2, f"BAT {'+' if plug else ' '}{bat:3d}%", cp(bc, bold=True))
+    hbar(win, y1 + 1, lw + 12, bw, bat, bc)
+    put(win, y1 + 2, lw + 2, f"CPU {cpu:4.0f}%", cp(P_CYAN))
+    hbar(win, y1 + 2, lw + 12, bw, int(cpu), P_CYAN)
+    put(win, y1 + 3, lw + 2, f"MEM {mem:4.0f}%", cp(P_BLUE))
+    hbar(win, y1 + 3, lw + 12, bw, int(mem), P_BLUE)
+    put(win, y1 + 4, lw + 2, f"DSK {disk:4.0f}%", cp(P_AMBER))
+    hbar(win, y1 + 4, lw + 12, bw, int(disk), P_AMBER)
+    put(win, y1 + 5, lw + 2, _clip(f"UPTIME  {uh}h {um:02d}m", max(10, rw - 4)), cp(P_DIM))
+    put(win, y1 + 6, lw + 2, _clip(f"SSID    {sd.get('ssid', 'N/A')}", max(10, rw - 4)), cp(P_DIM))
+    put(win, y1 + 7, lw + 2,
+        _clip(f"NET DN  {kbfmt(sd.get('net_dn', 0))}", max(10, rw - 4)), cp(P_DIM))
+    put(win, y1 + 8, lw + 2,
+        _clip(f"NET UP  {kbfmt(sd.get('net_up', 0))}", max(10, rw - 4)), cp(P_DIM))
+    put(win, y1 + 9, lw + 2,
+        _clip(f"HOST    {sd.get('hostname', 'N/A')}", max(10, rw - 4)), cp(P_DIM))
+
+    # ── Bottom full-width: Larger visualizer ─────────────────────────────────
+    y3 = y1 + body_h + gap
+    if y3 < H - 2:
+        vis_h = max(7, H - y3 - 1)
+        box(win, y3, 0, vis_h, W - 1, "MUSIC VISUALIZER")
+        draw_spectrum(win, y3 + 1, 1, max(2, vis_h - 2), max(4, W - 3), list(ST._spec_smooth))
 
     put(win, H-1, 0,
-        " [ENTER]=check  [p] pomo  [r] reset  [a] add  [d] del todo  [space]=music  [←→] views  [q] quit ",
+        " [ENTER]=check  [a] add todo  [d] del todo  [p] pomo  [r] reset  [space]=music  [q] quit ",
         cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2963,7 +2951,7 @@ def v_clock(win, W, H):
     n = len(lib)
 
     if W < 90 or H < 24:
-        v_library(win, W, H)
+        v_clock(win, W, H)
         return
 
     put(win, 1, 2, "MUSIC DASHBOARD", cp(P_HI, bold=True) | curses.A_BOLD)
@@ -3393,146 +3381,6 @@ def _lib_filtered_indices():
     lib = AUDIO.library
     return [i for i, trk in enumerate(lib) if _lib_matches_filter(trk, LS.filter)]
 
-def v_library(win, W, H):
-    lib = AUDIO.library
-    n = len(lib)
-    user_n = max(0, len(lib) - len(BUILTIN_TRACKS))
-    filt_idx = _lib_filtered_indices()
-    fn = len(filt_idx)
-
-    # Header row (Apple-like clean title + segmented metadata)
-    put(win, 1, 2, "MUSIC LIBRARY", cp(P_HI, bold=True) | curses.A_BOLD)
-    seg = f" {n} Tracks "
-    seg2 = f" {user_n} Added "
-    sx = max(2, W - len(seg) - len(seg2) - 6)
-    put(win, 1, sx, seg, cp(P_CYAN, bold=True) | curses.A_REVERSE)
-    put(win, 1, sx + len(seg) + 1, seg2, cp(P_DIM))
-    tabs = [("ALL", "all"), ("BUILT-IN", "builtin"), ("YOUTUBE", "youtube"), ("FILES", "file")]
-    tx = 2
-    for label, key in tabs:
-        active = (LS.filter == key)
-        attr = (cp(P_CYAN, bold=True) | curses.A_REVERSE) if active else cp(P_DIM)
-        pill = f" {label} "
-        put(win, 2, tx, pill, attr)
-        tx += len(pill) + 1
-    put(win, 2, max(2, W - 20), f"Showing {fn}/{n}", cp(P_DIM))
-    put(win, 3, 0, "─" * W, cp(P_BOX))
-
-    # Hero card
-    hero_y = 4
-    hero_h = 5
-    box(win, hero_y, 1, hero_h, W - 2, "NOW PLAYING")
-    cur = AUDIO.current if lib else {"name": "No track", "artist": "-", "source": ""}
-    src = cur.get("source", "")
-    src_lbl = "BUILT-IN" if src == "builtin" else "YOUTUBE" if ("youtube" in src or "youtu.be" in src) else "LOCAL"
-    state = "PLAYING" if AUDIO.playing else "PAUSED"
-    state_col = cp(P_GREEN, bold=True) if AUDIO.playing else cp(P_AMBER, bold=True)
-    put(win, hero_y + 1, 3, cur.get("name", "")[: max(10, W - 20)], cp(P_HI, bold=True))
-    put(win, hero_y + 2, 3, cur.get("artist", "")[: max(10, W - 20)], cp(P_DIM))
-    put(win, hero_y + 1, max(3, W - 22), f" {state} ", state_col | curses.A_REVERSE)
-    put(win, hero_y + 2, max(3, W - 22), f" {src_lbl} ", cp(P_DIM))
-    put(win, hero_y + 3, 3,
-        f"Queue {AUDIO.track_idx+1 if n else 0}/{n}   Shuffle {'On' if AUDIO.shuffle else 'Off'}   Repeat {'On' if AUDIO.repeat else 'Off'}",
-        cp(P_MID))
-
-    # List panel
-    list_y = hero_y + hero_h + 1
-    panel_h = 7 if H >= 30 else 6
-    list_h = max(8, H - list_y - panel_h - 3)
-    box(win, list_y, 1, list_h, W - 2, "TRACKS")
-    put(win, list_y + 1, 3, "SRC", cp(P_DIM, bold=True))
-    put(win, list_y + 1, 10, "TITLE", cp(P_DIM, bold=True))
-    put(win, list_y + 1, max(12, W - 26), "DURATION", cp(P_DIM, bold=True))
-    put(win, list_y + 1, max(12, W - 15), "TYPE", cp(P_DIM, bold=True))
-    put(win, list_y + 2, 2, "─" * (W - 5), cp(P_BOX))
-
-    rows = max(1, list_h - 4)
-    if fn == 0:
-        LS.cursor = 0
-        vis_idx = []
-        start_pos = 0
-    else:
-        if LS.cursor not in filt_idx:
-            LS.cursor = filt_idx[0]
-        cur_pos = filt_idx.index(LS.cursor)
-        start_pos = max(0, min(cur_pos - rows // 2, max(0, fn - rows)))
-        vis_idx = filt_idx[start_pos:start_pos + rows]
-
-    for i, ri in enumerate(vis_idx):
-        trk = lib[ri]
-        ry = list_y + 3 + i
-        sel = (ri == LS.cursor)
-        now = (ri == AUDIO.track_idx)
-
-        src = trk.get("source", "")
-        src_icon = "B" if src == "builtin" else "Y" if ("youtube" in src or "youtu.be" in src) else "F"
-        dur = trk.get("duration", 0) or 0
-        dur_s = f"{int(dur)//60}:{int(dur)%60:02d}" if dur > 0 else "live"
-        typ = "built-in" if src == "builtin" else "youtube" if src_icon == "Y" else "file"
-
-        title_w = max(8, W - 40)
-        row_attr = cp(P_CYAN) | curses.A_REVERSE if sel else cp(P_GREEN if now else P_MID)
-        if sel:
-            put(win, ry, 2, " " * (W - 5), row_attr)
-        put(win, ry, 3, src_icon, row_attr)
-        put(win, ry, 6, "▶" if now else "•", cp(P_GREEN if now else P_DIM))
-        put(win, ry, 10, trk.get("name", "")[:title_w], row_attr)
-        put(win, ry, max(12, W - 26), dur_s[:8], row_attr)
-        put(win, ry, max(12, W - 15), typ[:10], row_attr)
-
-    if fn > rows and fn > 0:
-        pos = filt_idx.index(LS.cursor) + 1 if LS.cursor in filt_idx else 1
-        put(win, list_y, W - 15, f" {pos}/{fn} ", cp(P_DIM))
-    elif fn == 0:
-        centre(win, list_y + max(2, list_h // 2), "No tracks in this filter", cp(P_DIM))
-
-    # Message area
-    if LS.msg and time.time() - LS.msg_time > 4.0:
-        LS.msg = ""
-    msg = AUDIO.status_msg or LS.msg
-    if msg:
-        col = P_RED if "ERROR" in msg else (P_GREEN if "Added" in msg or "Removed" in msg else P_AMBER)
-        put(win, list_y + list_h, 2, msg[:W-4], cp(col, bold=True))
-
-    panel_y = list_y + list_h + 1
-    blink = "_" if int(time.time() * 2) % 2 else " "
-
-    if LS.mode == "add_url":
-        box(win, panel_y, 2, panel_h, W - 4, "ADD YOUTUBE")
-        put(win, panel_y + 1, 4, "Paste URL and press Enter", cp(P_DIM))
-        disp = LS.buf if len(LS.buf) <= W - 12 else "..." + LS.buf[-(W - 15):]
-        put(win, panel_y + 2, 4, (disp + blink)[:W-8], cp(P_AMBER, bold=True))
-        put(win, panel_y + 3, 4, "youtube.com / youtu.be / music.youtube.com", cp(P_DIM))
-        put(win, panel_y + 4, 4, "Esc to cancel", cp(P_DIM))
-
-    elif LS.mode == "add_file":
-        box(win, panel_y, 2, panel_h, W - 4, "ADD LOCAL FILE")
-        put(win, panel_y + 1, 4, "Paste absolute file path and press Enter", cp(P_DIM))
-        disp = LS.buf if len(LS.buf) <= W - 12 else "..." + LS.buf[-(W - 15):]
-        put(win, panel_y + 2, 4, (disp + blink)[:W-8], cp(P_AMBER, bold=True))
-        put(win, panel_y + 3, 4, "MP3 FLAC WAV OGG M4A AAC OPUS WEBM", cp(P_DIM))
-        put(win, panel_y + 4, 4, "Esc to cancel", cp(P_DIM))
-
-    elif LS.mode == "confirm_del":
-        trk = lib[LS.cursor] if LS.cursor < len(lib) else {}
-        box(win, panel_y, 2, 4, W - 4, "REMOVE TRACK")
-        centre(win, panel_y + 1,
-               f"Remove '{trk.get('name','?')[:40]}' from library?  Y=yes  N/Esc=cancel",
-               cp(P_RED, bold=True))
-
-    else:
-        box(win, panel_y, 2, 4, W - 4, "QUICK ACTIONS")
-        centre(win, panel_y + 1,
-               "Y add YouTube   F add file   D remove selected   Enter play selected",
-               cp(P_DIM))
-        centre(win, panel_y + 2,
-             "Filters: 1 All   2 Built-in   3 YouTube   4 Files",
-               cp(P_DIM))
-
-    put(win, H - 1, 0,
-         " 1/2/3/4 filter   Y add YouTube   F add file   D remove   Enter play   j/k browse ",
-        cp(P_DIM))
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  CHROME
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3542,7 +3390,16 @@ def draw_topbar(win, W):
     bat=sd.get("bat_pct",100); plug=sd.get("bat_plug",True)
     bc=P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
     put(win,0,0," "*W, cp(P_DIM)|curses.A_REVERSE)
-    put(win,0,1,f" {ts}  {ds}", cp(P_HI)|curses.A_REVERSE)
+
+    # Dashboard-only override: show running pomodoro status on the left.
+    if ST.view == 0 and ST.pomo_run:
+        pm = int(ST.pomo_secs) // 60
+        ps = int(ST.pomo_secs) % 60
+        left = f" POMO {ST.pomo_phase} {pm:02d}:{ps:02d} "
+    else:
+        left = f" {ts}  {ds}"
+    put(win,0,1,left[:max(0, W-2)], cp(P_HI)|curses.A_REVERSE)
+
     if 0 <= ST.view < len(ALL_VIEW_NAMES):
         view_name = ALL_VIEW_NAMES[ST.view]
     else:
@@ -3557,7 +3414,8 @@ def draw_topbar(win, W):
     put(win,0,W-len(right)-1,right, cp(bc)|curses.A_REVERSE)
 
 def draw_navbar(win, W, H):
-    dots="  ".join("◆" if i==ST.view else "◇" for i in range(len(VIEWS)))
+    active_view = ST.view if ST.view in NAV_CYCLE_VIEWS else HUB_VIEW_IDX
+    dots="  ".join("◆" if i==active_view else "◇" for i in NAV_CYCLE_VIEWS)
     put(win,H-2,1,"[← h]",cp(P_DIM))
     centre(win,H-2,dots,cp(P_DIM))
     put(win,H-2,W-7,"[l →]",cp(P_DIM))
@@ -4456,26 +4314,8 @@ def _handle_mouse():
 
     # ── Scroll wheel (Button4 = up, Button5 = down) ───────────────────
     if bstate & curses.BUTTON4_PRESSED:
-        if v == 8:
-            if NSS.tab == 0:
-                NSS.scroll = max(0, NSS.scroll - 3)
-            elif NSS.tab == 1 and NSS.stock_screen == 0:
-                NSS.market_cur = max(0, NSS.market_cur - 1)
-            elif NSS.tab == 1 and NSS.stock_screen == 1:
-                NSS.stock_cur  = max(0, NSS.stock_cur - 1)
-        elif v == 9:
-            ECS.cursor = max(0, ECS.cursor - 1)
         return
     if bstate & curses.BUTTON5_PRESSED:
-        if v == 8:
-            if NSS.tab == 0:
-                NSS.scroll += 3
-            elif NSS.tab == 1 and NSS.stock_screen == 0:
-                NSS.market_cur += 1
-            elif NSS.tab == 1 and NSS.stock_screen == 1:
-                NSS.stock_cur  += 1
-        elif v == 9:
-            ECS.cursor += 1
         return
 
     # ── Only handle left-button click/press from here ─────────────────
@@ -4485,18 +4325,7 @@ def _handle_mouse():
 
     # ── Tab bar row (row 1) ───────────────────────────────────────────
     if my == 1:
-        if v == 9:   # ETF/Crypto sub-tabs
-            for x0, x1, sidx in ECS.sub_regions:
-                if x0 <= mx < x1:
-                    ECS.screen = sidx; ECS.cursor = 0; return
-        else:        # News/Stocks main tabs
-            for x0, x1, tidx in NSS.tab_regions:
-                if x0 <= mx < x1:
-                    NSS.tab = tidx; NSS.news_cursor = -1; return
-
-    # ── Only News & Stocks view handles further click logic ──────────
-    if v != 8:
-        return
+        pass
 
     # ── News tab: click a headline row ───────────────────────────────
     if NSS.tab == 0:
@@ -4563,11 +4392,11 @@ def handle_key(k):
     # Check if ANY input mode is active - if so, ONLY handle input-specific keys
     # This prevents shortcuts from interfering with text input
     input_mode_active = (ST.todo_add or 
-                         (v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode)) or 
+                         (v == 5 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode)) or 
                          (v in (1, 5) and LS.mode in ("add_url", "add_file")) or 
-                         (v == 7 and VS.mode in ("add_url", "add_file")) or 
+                         (v == 6 and VS.mode in ("add_url", "add_file")) or
                          (v == 8 and NSS.stock_input) or
-                         ECS.input_mode)
+                         (v == 9 and ECS.input_mode))
 
     if ST.todo_add:
         if k in (10, 13):
@@ -4628,7 +4457,7 @@ def handle_key(k):
         return
 
     # Crypto/ETF ticker input - protect it completely
-    if v == 10 and ECS.input_mode:
+    if v == 9 and ECS.input_mode:
         if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
             ECS.input_buf = ECS.input_buf[:-1]
         elif k == 27:
@@ -4648,7 +4477,7 @@ def handle_key(k):
         return
 
     # Portfolio stock ticker input - protect it completely
-    if v == 9 and NSS.stock_input:
+    if v == 8 and NSS.stock_input:
         if k in (curses.KEY_BACKSPACE, 127, 8, curses.KEY_DC):
             NSS.stock_buf = NSS.stock_buf[:-1]
         elif k == 27:
@@ -4676,16 +4505,20 @@ def handle_key(k):
     # Navigation shortcuts (only when NOT in input mode)
     if not input_mode_active:
         if k in (curses.KEY_RIGHT, ord('l'), ord('L'), 9):
-            ST.view = (v + 1) % len(VIEWS); return
+            if v in SHORTCUT_ONLY_VIEWS:
+                return
+            ST.view = _cycle_view(v, +1); return
         if k in (curses.KEY_LEFT, ord('h'), ord('H')):
-            ST.view = (v - 1) % len(VIEWS); return
+            if v in SHORTCUT_ONLY_VIEWS:
+                return
+            ST.view = _cycle_view(v, -1); return
 
     # Global shortcuts (only when NOT in input mode)
     if not input_mode_active:
         if k == 27:
             # Page-wise back behavior: only return from shortcut-only pages
             # to the page they were opened from. Otherwise ESC is local/no-op.
-            if v in (9, 10) and ST.return_view is not None:
+            if v in SHORTCUT_ONLY_VIEWS and ST.return_view is not None:
                 ST.view = ST.return_view
                 ST.return_view = None
             return
@@ -4786,7 +4619,7 @@ def handle_key(k):
                 elif k in (ord('n'), ord('N'), 27):
                     LS.mode = "browse"
 
-        elif v == 6:
+        elif v == 5:
             if k == ord('1'):   CS.mode = "day"
             elif k == ord('2'): CS.mode = "week"
             elif k == ord('3'): CS.mode = "month"
@@ -4833,7 +4666,7 @@ def handle_key(k):
                 threading.Thread(target=refresh_calendar, daemon=True).start()
                 CS.msg = "Refreshing..."; CS.msg_time = time.time()
 
-        elif v == 7:
+        elif v == 6:
             if k in (ord('y'), ord('Y')):   VS.mode = "add_url";  VS.buf = ""
             elif k in (ord('o'), ord('O')): VS.mode = "add_file"; VS.buf = ""
             elif k in (ord('s'), ord('S')):
@@ -4848,28 +4681,56 @@ def handle_key(k):
                 VS.msg = ("renderer: ASCII preferred" if now_ascii else "renderer: auto (mpv/tct first)")
                 VS.msg_time = time.time()
 
-        elif v == 8:
-            # News & Market Hub shortcuts
+        elif v == HUB_VIEW_IDX:
+            # Shortcut-only child pages are entered from the hub.
             if k == ord('1'):
-                ST.return_view = 8
-                ST.view = 9  # Jump to NEWS & STOCKS
+                NSS.tab = 0
+                ST.return_view = HUB_VIEW_IDX
+                ST.view = NEWS_STOCKS_VIEW_IDX
             elif k == ord('2'):
-                ST.return_view = 8
-                ST.view = 9  # Jump to NEWS & STOCKS (portfolio view)
                 NSS.tab = 1
+                ST.return_view = HUB_VIEW_IDX
+                ST.view = NEWS_STOCKS_VIEW_IDX
             elif k == ord('3'):
-                ST.return_view = 8
-                ST.view = 10  # Jump to ETF · CRYPTO
+                ST.return_view = HUB_VIEW_IDX
+                ST.view = ETF_CRYPTO_VIEW_IDX
             elif k == ord('r'):
-                # Refresh all market data
+                _news_last = 0.0
+                _stocks_last = 0.0
+                _market_last = 0.0
+                _etf_last = 0.0
+                _crypto_last = 0.0
+                threading.Thread(target=fetch_news_bg, daemon=True).start()
+                threading.Thread(target=lambda: fetch_stocks_bg(load_stock_watchlist()), daemon=True).start()
+                threading.Thread(target=fetch_market_bg, daemon=True).start()
                 threading.Thread(target=fetch_etf_bg, daemon=True).start()
                 threading.Thread(target=fetch_crypto_bg, daemon=True).start()
-                threading.Thread(target=fetch_market_bg, daemon=True).start()
-                threading.Thread(target=fetch_news_bg, daemon=True).start()
-        elif v == 9:
+
+        elif v == NEWS_STOCKS_VIEW_IDX:
+            # News & Stocks shortcuts
             _handle_news_stocks_key(k)
-        elif v == 10:
-            _handle_etf_crypto_key(k)
+
+        elif v == ETF_CRYPTO_VIEW_IDX:
+            # ETF/Crypto shortcuts
+            if k == ord('1'):   ECS.screen = 0; ECS.cursor = 0
+            elif k == ord('2'): ECS.screen = 1; ECS.cursor = 0
+            elif k == ord('3'): ECS.screen = 2; ECS.cursor = 0
+            elif k == ord('4'): ECS.screen = 3; ECS.cursor = 0
+            elif k in (ord('j'), curses.KEY_DOWN):
+                ECS.cursor += 1
+            elif k in (ord('k'), curses.KEY_UP):
+                ECS.cursor = max(0, ECS.cursor - 1)
+            elif k == ord('a'):
+                ECS.input_mode = True; ECS.input_buf = ""
+            elif k == ord('d') and ECS.custom:
+                if ECS.cursor < len(ECS.custom):
+                    ECS.custom.pop(ECS.cursor)
+                    _save_ec_custom()
+                    ECS.msg = "Removed"; ECS.msg_time = time.time()
+            elif k == ord('r'):
+                threading.Thread(target=fetch_etf_bg, daemon=True).start()
+                threading.Thread(target=fetch_crypto_bg, daemon=True).start()
+                ECS.msg = "Refreshing..."; ECS.msg_time = time.time()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5710,39 +5571,6 @@ threading.Thread(target=get_home_currency,        daemon=True).start()
 #  VIEW 9 — NEWS & STOCKS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class NewsStocksState:
-    def __init__(self):
-        self.scroll        = 0
-        self.tab           = 0        # 0=news  1=stocks
-        self.stock_screen  = 0        # 0=market/trending  1=portfolio
-        self.stock_input   = False    # adding ticker in portfolio
-        self.stock_buf     = ""
-        self.stock_cur     = 0        # cursor in portfolio list
-        self.market_cur    = 0        # cursor in market trending list
-        self.country_cur   = 0
-        self.country_mode  = False
-        self.msg           = ""
-        self.msg_time      = 0.0
-        # mouse / keyboard item selection
-        self.news_row_map  = {}
-        self.tab_regions   = []
-        self.stock_sub_regions = []  # [(x0,x1,screen_idx)] for M/P sub-tabs
-        self.news_cursor   = -1
-
-NSS = NewsStocksState()
-
-# Initialise country_cur to match saved country
-def _init_nss_country():
-    code = get_user_country()
-    if code and code in COUNTRY_LIST:
-        try:
-            NSS.country_cur = COUNTRY_LIST.index(code)
-        except ValueError:
-            NSS.country_cur = 0
-
-_init_nss_country()
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  CONSOLIDATED NEWS & MARKET HUB — Market Pulse + Top Mover + Headlines
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5806,7 +5634,7 @@ def v_news_market_hub(win, W, H):
 
     put(win, H - 2, 0, "─" * W, cp(P_BOX))
     put(win, H - 1, 2,
-        "[1] all news   [2] stocks board   [3] etf/crypto deck   [r] refresh everything   [←→] views   [q] quit",
+        "[1] all news   [2] stocks board   [3] etf/crypto deck   [r] refresh everything   [ESC] back from child page   [q] quit",
         cp(P_DIM))
 
 
@@ -6589,6 +6417,7 @@ class EtfCryptoState:
         self.msg        = ""
         self.msg_time   = 0.0
         self.sub_regions = []    # mouse hit regions for sub-tabs
+        self.show_modal = False   # Show etf/crypto as overlay
 
 ECS = EtfCryptoState()
 
@@ -6869,24 +6698,58 @@ def _fetch_and_cache_ec(sym):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  DASHBOARD — inject news/stocks widget
+#  APP STATE
+# ══════════════════════════════════════════════════════════════════════════════
+class NewsStocksState:
+    def __init__(self):
+        self.scroll        = 0
+        self.tab           = 0        # 0=news  1=stocks
+        self.stock_screen  = 0        # 0=market/trending  1=portfolio
+        self.stock_input   = False    # adding ticker in portfolio
+        self.stock_buf     = ""
+        self.stock_cur     = 0        # cursor in portfolio list
+        self.market_cur    = 0        # cursor in market trending list
+        self.country_cur   = 0
+        self.country_mode  = False
+        self.msg           = ""
+        self.msg_time      = 0.0
+        # mouse / keyboard item selection
+        self.news_row_map  = {}
+        self.tab_regions   = []
+        self.stock_sub_regions = []  # [(x0,x1,screen_idx)] for M/P sub-tabs
+        self.news_cursor   = -1
+
+NSS = NewsStocksState()
+
+# Initialise country_cur to match saved country
+def _init_nss_country():
+    code = get_user_country()
+    if code and code in COUNTRY_LIST:
+        try:
+            NSS.country_cur = COUNTRY_LIST.index(code)
+        except ValueError:
+            NSS.country_cur = 0
+
+_init_nss_country()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 VIEW_FNS = [v_dashboard, v_clock, v_focus, v_neofetch, v_network,
-            v_library, v_calendar, v_video, v_news_market_hub, v_news_stocks, v_etf_crypto]
+            v_calendar, v_video, v_news_market_hub, v_news_stocks, v_etf_crypto]
 
 def _in_text_input_mode():
     v = ST.view
     if ST.todo_add:                                              return True
-    if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode):  return True
+    if v == 5 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode):  return True
     if v in (1, 5) and LS.mode in ("add_url", "add_file"):       return True
-    if v == 7 and VS.mode in ("add_url", "add_file"):            return True
-    if v == 9 and NSS.stock_input:                               return True
-    if v == 9 and NSS.country_mode:                              return True
-    if v == 9 and not get_user_country():                        return True  # first-run picker
-    if v == 10 and ECS.input_mode:                               return True
+    if v == 6 and VS.mode in ("add_url", "add_file"):            return True
+    if v == 8 and NSS.stock_input:                               return True
+    if v == 9 and ECS.input_mode:                                return True
     return False
 
 
@@ -6975,3 +6838,4 @@ if __name__ == "__main__":
         AUDIO._kill()
         save_todos(ST.todos)
     print("\n  Goodbye! Todos saved.  [*]\n")
+    
