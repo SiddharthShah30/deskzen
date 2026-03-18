@@ -2,7 +2,7 @@
 """
 Terminal StandBy v3
 Apple-style standby for your terminal.
-Real synthesized music · Live spectrum visualizer · Neofetch panel
+Real synthesized music · Live spectrum visualizer · Neofetch panel for windows & calendar events · Customizable settings · Cross-platform support
 """
 
 # ─── cross-platform curses ───────────────────────────────────────────────────
