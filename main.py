@@ -1381,8 +1381,9 @@ class VideoPlayer:
 
     def set_ascii_viewport(self, cols, rows):
         with self._ascii_lock:
-            self._ascii_cols = max(24, int(cols))
-            self._ascii_rows = max(8, int(rows))
+            # Cap preview size so fullscreen terminals do not produce oversized ASCII frames.
+            self._ascii_cols = max(24, min(168, int(cols)))
+            self._ascii_rows = max(8, min(56, int(rows)))
 
     def get_ascii_frame(self):
         with self._ascii_lock:
@@ -1435,8 +1436,19 @@ class VideoPlayer:
                         rows = self._ascii_rows
 
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    src_h, src_w = gray.shape[:2]
+                    src_aspect = src_w / max(1, src_h)
+                    # Typical terminal glyph cells are taller than wide.
+                    char_aspect = 0.5
+
                     target_w = max(24, cols)
-                    target_h = max(8, rows)
+                    target_h = max(8, int(target_w / max(0.1, src_aspect * char_aspect)))
+                    if target_h > rows:
+                        target_h = max(8, rows)
+                        target_w = max(24, int(src_aspect * target_h * char_aspect))
+
+                    target_w = min(target_w, cols)
+                    target_h = min(target_h, rows)
                     small = cv2.resize(gray, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
                     lines = []
@@ -3420,6 +3432,92 @@ def draw_navbar(win, W, H):
     centre(win,H-2,dots,cp(P_DIM))
     put(win,H-2,W-7,"[l →]",cp(P_DIM))
 
+
+def _responsive_layout(W):
+    """Return (main_w, rail_x, rail_w) for wide-screen responsive mode."""
+    if W < 132:
+        return W, None, 0
+    rail_w = min(44, max(32, W // 4))
+    main_w = W - rail_w - 1
+    if main_w < 84:
+        return W, None, 0
+    rail_x = main_w + 1
+    return main_w, rail_x, rail_w
+
+
+def _view_hint_lines():
+    hints = {
+        0: ["Dashboard: tasks + system + visualizer", "Use A / D to add or remove todos", "Press Space to control music"],
+        1: ["Library view: browse all tracks", "Y for YouTube, O for local file", "R repeat, S shuffle, Z/X prev-next"],
+        2: ["Focus: pomodoro workflow", "P start/pause, R reset, S skip", "F cycles focus modes"],
+        3: ["Neofetch: hardware + OS panel", "Animated Pac-Man logo and bars", "Auto-refreshes each frame"],
+        4: ["Network: bandwidth + devices", "Tracks BT / USB and battery", "Good for live diagnostics"],
+        5: ["Calendar: day/week/month/year", "A add event, D delete event", "G sync ICS source"],
+        6: ["Video: local + YouTube playback", "T toggles terminal/window mode", "A toggles ASCII renderer"],
+        7: ["Hub: quick jump to news tools", "Use 8/9/0 shortcuts to switch", "Country drives feeds and symbols"],
+        8: ["News & Stocks: split tabs", "C change country, R refresh", "A/D manage watchlist"],
+        9: ["ETF/Crypto scanner", "J/K navigate, A add symbol", "R refresh market data"],
+    }
+    return hints.get(ST.view, ["Use left/right arrows to navigate views", "Press Q to quit", "Live data updates continuously"])
+
+
+def draw_side_rail(win, x, w, H):
+    """Extra wide-screen content rail shared across all views."""
+    if w < 24:
+        return
+
+    now = datetime.datetime.now()
+    sd = SD.snap()
+    bat = sd.get("bat_pct", 100)
+    bat_col = P_GREEN if bat > 40 else (P_AMBER if bat > 15 else P_RED)
+
+    try:
+        for y in range(1, H-1):
+            put(win, y, x-1, "│", cp(P_BOX))
+    except Exception:
+        pass
+
+    y = 1
+    h1 = min(10, max(7, H // 5))
+    if y + h1 < H - 2:
+        box(win, y, x, h1, w, "SYSTEM")
+        put(win, y+1, x+2, now.strftime("%A"), cp(P_HI, bold=True))
+        put(win, y+2, x+2, now.strftime("%d %b %Y  %H:%M"), cp(P_DIM))
+        put(win, y+4, x+2, f"CPU  {sd.get('cpu', 0):5.1f}%", cp(P_DIM))
+        put(win, y+5, x+2, f"MEM  {sd.get('mem_pct', 0):5.1f}%", cp(P_DIM))
+        put(win, y+6, x+2, f"DSK  {sd.get('disk_pct', 0):5.1f}%", cp(P_DIM))
+        put(win, y+7, x+2, f"BAT  {bat:5.1f}%", cp(bat_col, bold=True))
+    y += h1
+
+    h2 = min(10, max(7, H // 5))
+    if y + h2 < H - 2:
+        box(win, y, x, h2, w, "NOW PLAYING")
+        if AUDIO.playing:
+            td = AUDIO.current
+            put(win, y+1, x+2, "ACTIVE", cp(P_GREEN, bold=True))
+            put(win, y+2, x+2, (td.get("name", "Track")[:w-4]), cp(P_HI))
+            put(win, y+3, x+2, (td.get("artist", "")[:w-4]), cp(P_DIM))
+            dur = int(td.get("duration", 0) or 0)
+            el = int(AUDIO.elapsed)
+            put(win, y+5, x+2, f"{el//60:02d}:{el%60:02d} / {dur//60:02d}:{dur%60:02d}", cp(P_DIM))
+            bw = max(8, w-4)
+            pct = int((el / max(1, dur)) * 100) if dur > 0 else 0
+            hbar(win, y+6, x+2, bw-2, pct, P_CYAN)
+        else:
+            put(win, y+2, x+2, "No music playing", cp(P_DIM))
+            put(win, y+4, x+2, "Space: play / pause", cp(P_DIM))
+            put(win, y+5, x+2, "Z/X: prev / next", cp(P_DIM))
+    y += h2
+
+    h3 = max(6, H - y - 2)
+    if h3 >= 6:
+        box(win, y, x, h3, w, "VIEW HELP")
+        vn = ALL_VIEW_NAMES[ST.view] if 0 <= ST.view < len(ALL_VIEW_NAMES) else "UNKNOWN"
+        put(win, y+1, x+2, vn[:w-4], cp(P_CYAN, bold=True))
+        lines = _view_hint_lines()
+        for i, line in enumerate(lines[:max(1, h3-4)]):
+            put(win, y+3+i, x+2, line[:w-4], cp(P_DIM))
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  TEXT INPUT HELPER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4206,10 +4304,14 @@ def v_video(win, W, H):
     put(win, 0, max(2, W-58), f"RENDER: {ascii_txt}", cp(P_DIM, bold=True))
     put(win, 1, 0, "─"*W, cp(P_BOX))
 
+    wide_mode = W >= 140
+    content_w = min(max(40, W - 4), 170)
+    content_x = max(2, (W - content_w) // 2)
+
     hero_y = 2
-    hero_h = 10
-    hero_w = W - 4
-    box(win, hero_y, 2, hero_h, hero_w, "PLAYBACK")
+    hero_h = 12 if H >= 42 else 10
+    hero_w = content_w
+    box(win, hero_y, content_x, hero_h, hero_w, "PLAYBACK")
 
     if VIDEO.playing:
         state = "NOW PLAYING"
@@ -4236,42 +4338,107 @@ def v_video(win, W, H):
         primary = "Choose a source to start watching."
         secondary = "Y for YouTube URL, O for local video file."
 
-    put(win, hero_y+1, 4, f"[{state}]", cp(state_col, bold=True))
-    put(win, hero_y+1, 20, f"Renderer: {_trim(rname, hero_w-26)}", cp(P_DIM))
-    put(win, hero_y+3, 4, _trim(primary, hero_w-6), cp(P_HI, bold=True))
-    put(win, hero_y+4, 4, _trim(secondary, hero_w-6), cp(P_DIM))
+    put(win, hero_y+1, content_x+2, f"[{state}]", cp(state_col, bold=True))
+    put(win, hero_y+1, content_x+18, f"Renderer: {_trim(rname, hero_w-24)}", cp(P_DIM))
+    put(win, hero_y+3, content_x+2, _trim(primary, hero_w-4), cp(P_HI, bold=True))
+    put(win, hero_y+4, content_x+2, _trim(secondary, hero_w-4), cp(P_DIM))
 
     status_txt = VIDEO.status.strip()
     if status_txt:
         err = ("error" in status_txt.lower() or "failed" in status_txt.lower()
                or "not found" in status_txt.lower())
-        put(win, hero_y+6, 4, _trim("Status: " + status_txt, hero_w-6), cp(P_RED if err else P_CYAN))
+        put(win, hero_y+6, content_x+2, _trim("Status: " + status_txt, hero_w-4), cp(P_RED if err else P_CYAN))
 
-    put(win, hero_y+8, 4, "Flow: 1) Pick source  2) Paste path/URL  3) Enter to launch", cp(P_DIM))
+    put(win, hero_y+8, content_x+2, "Flow: 1) Pick source  2) Paste path/URL  3) Enter to launch", cp(P_DIM))
+    if hero_h >= 12:
+        put(win, hero_y+9, content_x+2,
+            _trim(f"Runtime: {'PLAYING' if VIDEO.playing else 'IDLE'}  |  Mode: {mode_txt}  |  Render: {ascii_txt}", hero_w-4),
+            cp(P_DIM))
+        put(win, hero_y+10, content_x+2,
+            _trim("Fullscreen tip: this view expands with extra actions/help panels on wide terminals.", hero_w-4),
+            cp(P_DIM))
 
     act_y = hero_y + hero_h
     act_h = max(6, H - act_y - 3)
     if act_h >= 6:
         if VIDEO.playing and VIDEO.ascii_mode:
-            box(win, act_y, 2, act_h, hero_w, "ASCII PREVIEW")
-            drawable_h = max(1, act_h - 2)
-            drawable_w = max(8, hero_w - 3)
-            VIDEO.set_ascii_viewport(drawable_w, drawable_h)
-            lines = VIDEO.get_ascii_frame()
-            for i in range(min(drawable_h, len(lines))):
-                put(win, act_y + 1 + i, 3, lines[i][:drawable_w], cp(P_HI))
+            if wide_mode and hero_w >= 96:
+                prev_w = max(54, int(hero_w * 0.68))
+                info_x = content_x + prev_w
+                info_w = hero_w - prev_w
+
+                box(win, act_y, content_x, act_h, prev_w, "ASCII PREVIEW")
+                drawable_h = max(1, act_h - 2)
+                drawable_w = max(8, prev_w - 2)
+                VIDEO.set_ascii_viewport(drawable_w, drawable_h)
+                lines = VIDEO.get_ascii_frame()
+                shown_h = min(drawable_h, len(lines))
+                y_off = max(0, (drawable_h - shown_h) // 2)
+                for i in range(shown_h):
+                    line = lines[i][:drawable_w]
+                    x_off = max(0, (drawable_w - len(line)) // 2)
+                    put(win, act_y + 1 + y_off + i, content_x + 1 + x_off, line, cp(P_HI))
+
+                box(win, act_y, info_x, act_h, info_w, "ASCII DETAILS")
+                put(win, act_y+1, info_x+2, "Renderer: OpenCV ASCII", cp(P_HI, bold=True))
+                put(win, act_y+2, info_x+2, "Audio: Off in ASCII mode", cp(P_DIM))
+                put(win, act_y+3, info_x+2, f"Viewport: up to {VIDEO._ascii_cols}x{VIDEO._ascii_rows}", cp(P_DIM))
+                put(win, act_y+4, info_x+2, "S stop  |  T switch mode  |  A toggle ASCII", cp(P_DIM))
+                put(win, act_y+6, info_x+2, "If frame looks dense:", cp(P_HI, bold=True))
+                put(win, act_y+7, info_x+2, "1) Reduce terminal zoom", cp(P_DIM))
+                put(win, act_y+8, info_x+2, "2) Shrink window width", cp(P_DIM))
+                put(win, act_y+9, info_x+2, "3) Use WINDOW mode for native playback", cp(P_DIM))
+            else:
+                box(win, act_y, content_x, act_h, hero_w, "ASCII PREVIEW")
+                drawable_h = max(1, act_h - 2)
+                drawable_w = max(8, hero_w - 2)
+                VIDEO.set_ascii_viewport(drawable_w, drawable_h)
+                lines = VIDEO.get_ascii_frame()
+                shown_h = min(drawable_h, len(lines))
+                y_off = max(0, (drawable_h - shown_h) // 2)
+                for i in range(shown_h):
+                    line = lines[i][:drawable_w]
+                    x_off = max(0, (drawable_w - len(line)) // 2)
+                    put(win, act_y + 1 + y_off + i, content_x + 1 + x_off, line, cp(P_HI))
         else:
-            box(win, act_y, 2, act_h, hero_w, "QUICK ACTIONS")
-            put(win, act_y+1, 4, "Y  YouTube URL", cp(P_HI, bold=True))
-            put(win, act_y+2, 4, "O  Open local file", cp(P_HI, bold=True))
-            put(win, act_y+3, 4, "S  Stop playback", cp(P_HI, bold=True))
-            put(win, act_y+4, 4, "T  Toggle terminal/window mode", cp(P_HI, bold=True))
-            put(win, act_y+5, 4, "A  Toggle ASCII renderer", cp(P_HI, bold=True))
-            put(win, act_y+1, hero_w//2, "Supports: mp4 mkv mov avi webm", cp(P_DIM))
-            put(win, act_y+2, hero_w//2, "YouTube: youtube.com or youtu.be links", cp(P_DIM))
-            put(win, act_y+3, hero_w//2, "Tip: use absolute paths for local files", cp(P_DIM))
-            put(win, act_y+4, hero_w//2, "Windows: tct may fail, ASCII fallback is used", cp(P_DIM))
-            put(win, act_y+5, hero_w//2, "ASCII playback is terminal-only and no-audio", cp(P_DIM))
+            box(win, act_y, content_x, act_h, hero_w, "QUICK ACTIONS")
+            if wide_mode and hero_w >= 108:
+                c1 = content_x + 2
+                c2 = content_x + hero_w // 3
+                c3 = content_x + (hero_w * 2) // 3
+
+                put(win, act_y+1, c1, "Y  YouTube URL", cp(P_HI, bold=True))
+                put(win, act_y+2, c1, "O  Open local file", cp(P_HI, bold=True))
+                put(win, act_y+3, c1, "S  Stop playback", cp(P_HI, bold=True))
+                put(win, act_y+4, c1, "T  Toggle terminal/window mode", cp(P_HI, bold=True))
+                put(win, act_y+5, c1, "A  Toggle ASCII renderer", cp(P_HI, bold=True))
+                put(win, act_y+6, c1, "K  Force kill stuck players", cp(P_HI, bold=True))
+
+                put(win, act_y+1, c2, "Supports: mp4 mkv mov avi webm", cp(P_DIM))
+                put(win, act_y+2, c2, "YouTube: youtube.com or youtu.be links", cp(P_DIM))
+                put(win, act_y+3, c2, "Tip: use absolute paths for local files", cp(P_DIM))
+                put(win, act_y+4, c2, "Windows: tct may fail; ASCII fallback", cp(P_DIM))
+                put(win, act_y+5, c2, "ASCII is terminal-only and no-audio", cp(P_DIM))
+
+                put(win, act_y+1, c3, "CURRENT", cp(P_HI, bold=True))
+                put(win, act_y+2, c3, f"Engine: {_trim(rname, max(8, hero_w//3 - 10))}", cp(P_DIM))
+                put(win, act_y+3, c3, f"Mode: {mode_txt}", cp(P_DIM))
+                put(win, act_y+4, c3, f"Render: {ascii_txt}", cp(P_DIM))
+                put(win, act_y+5, c3, f"State: {state}", cp(P_DIM))
+                if VIDEO.status:
+                    put(win, act_y+6, c3, _trim("Status: " + VIDEO.status, max(16, hero_w//3 - 4)), cp(P_DIM))
+            else:
+                put(win, act_y+1, content_x+2, "Y  YouTube URL", cp(P_HI, bold=True))
+                put(win, act_y+2, content_x+2, "O  Open local file", cp(P_HI, bold=True))
+                put(win, act_y+3, content_x+2, "S  Stop playback", cp(P_HI, bold=True))
+                put(win, act_y+4, content_x+2, "T  Toggle terminal/window mode", cp(P_HI, bold=True))
+                put(win, act_y+5, content_x+2, "A  Toggle ASCII renderer", cp(P_HI, bold=True))
+                right_x = content_x + hero_w // 2
+                put(win, act_y+1, right_x, "Supports: mp4 mkv mov avi webm", cp(P_DIM))
+                put(win, act_y+2, right_x, "YouTube: youtube.com or youtu.be links", cp(P_DIM))
+                put(win, act_y+3, right_x, "Tip: use absolute paths for local files", cp(P_DIM))
+                put(win, act_y+4, right_x, "Windows: tct may fail, ASCII fallback is used", cp(P_DIM))
+                put(win, act_y+5, right_x, "ASCII playback is terminal-only and no-audio", cp(P_DIM))
 
     blink = "▌" if int(time.time()*2)%2 else " "
     if VS.mode in ("add_url", "add_file"):
@@ -6783,7 +6950,15 @@ def main(stdscr):
 
         tick()
         draw_topbar(stdscr, W)
-        VIEW_FNS[ST.view](stdscr, W, H)
+
+        main_w, rail_x, rail_w = _responsive_layout(W)
+        if rail_x is None:
+            VIEW_FNS[ST.view](stdscr, W, H)
+        else:
+            main_win = stdscr.derwin(H, main_w, 0, 0)
+            VIEW_FNS[ST.view](main_win, main_w, H)
+            draw_side_rail(stdscr, rail_x, rail_w, H)
+
         draw_navbar(stdscr, W, H)
         stdscr.refresh()
 
