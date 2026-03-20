@@ -3433,6 +3433,37 @@ def draw_navbar(win, W, H):
     put(win,H-2,W-7,"[l →]",cp(P_DIM))
 
 
+def draw_footer(win, W, H):
+    """Unified bottom menu bar for all views."""
+    hints = {
+        0: "[a] add todo  [d] done/remove  [space] music  [q] quit",
+        1: "[space] play/pause  [z/x] prev/next  [r] repeat  [s] shuffle",
+        2: "[p] start/pause  [r] reset  [s] skip  [f] mode",
+        3: "Neofetch live view  [space] music  [q] quit",
+        4: "Network monitor live  [space] music  [q] quit",
+        5: "[1/2/3/4] views  [a] add  [d] delete  [g] sync ICS",
+        6: "[o] file  [y] YouTube  [s] stop  [t] mode  [a] ASCII",
+        7: "Hub shortcuts: [8] News/Stocks  [9] ETF/Crypto  [0] Dashboard",
+        8: "[1/2] tab  [c] country  [a/d] watchlist  [r] refresh",
+        9: "[1/2/3/4] tab  [a] add symbol  [d] remove  [r] refresh",
+    }
+
+    put(win, H-3, 0, "─"*W, cp(P_BOX))
+    put(win, H-1, 0, " "*W, cp(P_DIM)|curses.A_REVERSE)
+
+    left = " [q] quit "
+    right = " [\u2190/\u2192] switch view "
+    msg = hints.get(ST.view, "Use arrows to navigate views")
+
+    put(win, H-1, 1, left[:max(0, W-2)], cp(P_HI)|curses.A_REVERSE)
+    put(win, H-1, max(1, W - len(right) - 1), right, cp(P_HI)|curses.A_REVERSE)
+
+    available = W - len(left) - len(right) - 6
+    if available > 8:
+        trimmed = msg if len(msg) <= available else msg[:available-1] + "…"
+        put(win, H-1, (W - len(trimmed)) // 2, trimmed, cp(P_DIM)|curses.A_REVERSE)
+
+
 def _responsive_layout(W):
     """Return (main_w, rail_x, rail_w) for wide-screen responsive mode."""
     if W < 132:
@@ -6960,6 +6991,7 @@ def main(stdscr):
             draw_side_rail(stdscr, rail_x, rail_w, H)
 
         draw_navbar(stdscr, W, H)
+        draw_footer(stdscr, W, H)
         stdscr.refresh()
 
         in_text = _in_text_input_mode()
