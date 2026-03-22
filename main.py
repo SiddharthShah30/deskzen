@@ -94,6 +94,10 @@ def kbfmt(k):
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Pac-Man open / closed mouth frames (5 rows tall, 7 cols wide)
+# ══════════════════════════════════════════════════════════════════════════════
+#  ANIMATIONS: Pac-Man, Anime, Logo, Bouncing
+# ══════════════════════════════════════════════════════════════════════════════
+
 _PAC_OPEN = [
     " ████ ",
     "██████",
@@ -118,10 +122,150 @@ _GHOST = [
     "█ ██ █",   # wavy bottom
 ]
 
+# Starfield animation - scrolling stars (beautiful space effect)
+_STARFIELD_FRAMES = [
+    [
+        "   ✦  ★  ✧     ✦",
+        "  ✧    ★   ✦    ",
+        "    ★  ✧  ✦  ★  ",
+        " ★   ✦    ✧    ★",
+        "✦  ✧   ★    ✦   ",
+        "  ✧  ✦   ★  ✧   ",
+        "★    ✦  ✧   ★   ",
+    ],
+    [
+        "  ✦    ★  ✧     ",
+        " ✧      ★   ✦   ",
+        "   ★   ✧  ✦  ★  ",
+        "★    ✦     ✧    ★",
+        " ✦  ✧   ★    ✦  ",
+        "   ✧  ✦   ★  ✧  ",
+        "  ★    ✦  ✧   ★ ",
+    ],
+    [
+        "✦    ★  ✧      ✦",
+        "✧      ★   ✦    ",
+        "  ★   ✧  ✦  ★   ",
+        "    ✦     ✧    ★",
+        "  ✦  ✧   ★    ✦ ",
+        "    ✧  ✦   ★  ✧ ",
+        "    ★    ✦  ✧   ★",
+    ],
+]
+
+# 3D Spinning cube (rotating perspective)
+_CUBE_FRAMES = [
+    [
+        "   ┌─────┐",
+        "  ╱       ╱│",
+        " ┌─────────┐ │ │",
+        " │      │ │ │ ╰",
+        " │      │ ╱  ",
+        " ╰─────────╯    ",
+    ],
+    [
+        "    ╱─────╱",
+        "   ╱       ╱ ",
+        "  ┌────────┐   ",
+        "  │      │  ",
+        "  │      │  ",
+        "  ╰────────╯  ",
+    ],
+    [
+        "   ┌─────┐ ",
+        "   │ ╱──╱ │ ",
+        "   │╱   ╱ │ ",
+        "   ┌─────────┐ ",
+        "   │      │ ",
+        "   ╰────────╯ ",
+    ],
+]
+
+# Ocean wave animation
+_WAVE_FRAMES = [
+    [
+        "     ≈≈≈      ",
+        "   ≈≈≈≈≈≈≈   ",
+        "  ≈≈≈≈≈≈≈≈≈  ",
+        " ≈≈≈≈ ≈ ≈≈≈≈≈ ",
+    ],
+    [
+        "    ≈≈≈≈     ",
+        "   ≈≈≈≈≈≈≈   ",
+        "  ≈≈≈  ≈≈≈≈  ",
+        " ≈≈≈≈≈≈≈≈≈≈≈ ",
+    ],
+    [
+        "   ≈≈≈≈≈    ",
+        "  ≈≈≈≈≈≈≈≈  ",
+        " ≈≈≈ ≈≈ ≈≈≈ ",
+        "≈≈≈≈≈≈≈≈≈≈≈≈ ",
+    ],
+]
+
+# Anime girl frames (dancing, 8 rows, ~12 cols wide)
+_ANIME_FRAMES = [
+    [  # Frame 1: neutral
+        "   ╔═╗   ",
+        "   ║▔▔╗  ",
+        "  ╔╣◕◕║╗ ",
+        "  ║╚□╩╝║ ",
+        "  ║ ╲╱ ║ ",
+        " ╔╡ │ │ ║ ",
+        " ║│ │ │╔╝ ",
+        " ╚══════╝ ",
+    ],
+    [  # Frame 2: left lean
+        "  ╔═╗    ",
+        "  ║▔▔╗   ",
+        " ╔╣◕◕║╗  ",
+        " ║╚□╩╝║  ",
+        " ║╲╱  ║  ",
+        "╔╡ │ │║  ",
+        "║│╱│ │╝  ",
+        "╚════════ ",
+    ],
+    [  # Frame 3: right lean
+        "    ╔═╗  ",
+        "   ╔║▔▔╗ ",
+        "  ║╣◕◕║╗ ",
+        "  ║╚□╩╝║ ",
+        "  ║  ╲╱║ ",
+        "  ║│ │ │╡╗",
+        "  ╚│ │ │║ ",
+        " ════════╝",
+    ],
+]
+
+# System logo spinning (circle, 5 rows)
+_LOGO_SPIN = [
+    "  ◇    ",
+    "  ◆    ",
+    "  ●    ",
+    "  ◆    ",
+    "  ◇    ",
+]
+
+# Bouncing ball (simple)
+_BOUNCE_FRAMES = [
+    "●      ",
+    " ●     ",
+    "  ●    ",
+    "   ●   ",
+    "    ●  ",
+    "     ● ",
+    "      ●",
+]
+
 # The track width matches LOGO_W = 26, minus 2 padding = 24 usable chars
 _TRACK_W = 22   # dots track width (chars)
 _DOT     = "·"
 _PELLET  = "●"
+
+class NeofetchState:
+    animation_mode = "pacman"  # pacman, anime, logo, bounce
+
+NFS = NeofetchState()
 
 def draw_animated_logo(win, y, x, t):
     """Pac-Man eats dots across the logo area. Returns height used."""
@@ -186,6 +330,48 @@ def draw_animated_logo(win, y, x, t):
                 put(win, PAC_Y + row, x + 1 + ti, "●", cp(P_CYAN, bold=True))
 
     return PAC_Y - y + 5   # total rows used
+
+
+def draw_starfield_logo(win, y, x, t):
+    """Scrolling starfield animation. Returns height used."""
+    frame_idx = int(t * 2) % len(_STARFIELD_FRAMES)
+    frame = _STARFIELD_FRAMES[frame_idx]
+
+    put(win, y, x, "  TERMINAL STANDBY  v3", cp(P_DIM))
+    put(win, y+1, x, "  " + "─" * 20, cp(P_BOX))
+
+    for i, line in enumerate(frame):
+        put(win, y + 2 + i, x + 1, line, cp(P_CYAN, bold=True))
+
+    return y - y + len(frame) + 2
+
+
+def draw_cube_anim(win, y, x, t):
+    """3D spinning cube animation. Returns height used."""
+    frame_idx = int(t * 2) % len(_CUBE_FRAMES)
+    frame = _CUBE_FRAMES[frame_idx]
+
+    put(win, y, x, "  TERMINAL STANDBY  v3", cp(P_DIM))
+    put(win, y+1, x, "  " + "─" * 20, cp(P_BOX))
+
+    for i, line in enumerate(frame):
+        put(win, y + 2 + i, x + 1, line, cp(P_BLUE, bold=True))
+
+    return y - y + len(frame) + 2
+
+
+def draw_wave_anim(win, y, x, t):
+    """Ocean wave animation. Returns height used."""
+    frame_idx = int(t * 3) % len(_WAVE_FRAMES)
+    frame = _WAVE_FRAMES[frame_idx]
+
+    put(win, y, x, "  TERMINAL STANDBY  v3", cp(P_DIM))
+    put(win, y+1, x, "  " + "─" * 20, cp(P_BOX))
+
+    for i, line in enumerate(frame):
+        put(win, y + 2 + i, x, line, cp(P_GREEN, bold=True))
+
+    return y - y + len(frame) + 2
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3155,6 +3341,50 @@ def v_focus(win, W, H):
     put(win,H-1,0," [p] start/pause  [r] reset  [s] skip  [f] mode  [←→] views  [q] quit ",cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  OS DETECTION & ASCII LOGOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def draw_windows_logo(win, y, x):
+    """Draw stylized Windows 11 logo in ASCII."""
+    logo = [
+        "  ╔════╗  ╔════╗",
+        "  ║ ▄▄ ║  ║ ▄▄ ║",
+        "  ║▄▄▄▄║  ║▄▄▄▄║",
+        "  ╚════╝  ╚════╝",
+        "  ╔════╗  ╔════╗",
+        "  ║ ▄▄ ║  ║ ▄▄ ║",
+        "  ║▄▄▄▄║  ║▄▄▄▄║",
+        "  ╚════╝  ╚════╝",
+    ]
+    for i, line in enumerate(logo):
+        if y + i < win.getmaxyx()[0]:
+            put(win, y + i, x, line, cp(P_CYAN, bold=True))
+    return len(logo)
+
+def draw_linux_logo(win, y, x):
+    """Draw Tux penguin (Linux logo) in ASCII."""
+    logo = [
+        "    ▄▀▀▀▀▀●",
+        "   █  ○ ○ ●",
+        "   ▀▄   ᴒ█",
+        "     ▀█▄●▀",
+        "     ▄█▀▀",
+        "    ██▀▀█",
+        "    ██  █",
+    ]
+    for i, line in enumerate(logo):
+        if y + i < win.getmaxyx()[0]:
+            put(win, y + i, x, line, cp(P_AMBER, bold=True))
+    return len(logo)
+
+def draw_system_logo(win, y, x):
+    """Draw appropriate OS logo based on system detected."""
+    if platform.system() == "Windows":
+        return draw_windows_logo(win, y, x)
+    else:
+        return draw_linux_logo(win, y, x)
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  VIEW 4 — NEOFETCH
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -3164,13 +3394,22 @@ def v_neofetch(win, W, H):
     # ── Layout ────────────────────────────────────────────────────────────
     AX     = 2          # logo left edge
     AY     = 1          # logo top
-    LOGO_W = 26         # pac-man column width
+    LOGO_W = 26         # animation column width
     IX     = AX + LOGO_W + 1   # info column starts here
     KEY_W  = 11         # width of key label field
     VAL_X  = IX + KEY_W
 
-    # ── Animated logo ─────────────────────────────────────────────────────
-    logo_h = draw_animated_logo(win, AY, AX, ST._anim_t)
+    # ── Animated logo (select based on mode) ───────────────────────────────
+    if NFS.animation_mode == "system":
+        logo_h = draw_system_logo(win, AY, AX)
+    elif NFS.animation_mode == "starfield":
+        logo_h = draw_starfield_logo(win, AY, AX, ST._anim_t)
+    elif NFS.animation_mode == "cube":
+        logo_h = draw_cube_anim(win, AY, AX, ST._anim_t)
+    elif NFS.animation_mode == "wave":
+        logo_h = draw_wave_anim(win, AY, AX, ST._anim_t)
+    else:  # pacman (default)
+        logo_h = draw_animated_logo(win, AY, AX, ST._anim_t)
 
     # ── Collect all values ────────────────────────────────────────────────
     uh, rem   = divmod(sd.get("uptime", 0), 3600)
@@ -3277,8 +3516,11 @@ def v_neofetch(win, W, H):
             hbar(win, ry, 9, bw, pct, col)
             put(win, ry, 9+bw+1, f"{pct:3d}%", cp(col))
 
+    os_name = "Windows" if platform.system() == "Windows" else "Linux"
+    mode_names = {"pacman": "Pac-Man", "starfield": "Starfield", "cube": "3D Cube", "wave": "Ocean Wave", "system": os_name}
+    mode_display = mode_names.get(NFS.animation_mode, "Unknown")
     put(win, H-1, 0,
-        " neofetch · live stats · auto-refresh  [←→] views  [q] quit ",
+        f" neofetch · {mode_display} · [0] OS  [1] Pac-Man  [2] Starfield  [3] Cube  [4] Wave  [←→] views  [q] quit ",
         cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4816,6 +5058,18 @@ def handle_key(k):
                     LS.mode   = "browse"
                 elif k in (ord('n'), ord('N'), 27):
                     LS.mode = "browse"
+
+        elif v == 3:
+            # Neofetch animation switching
+            if k == ord('0'):   NFS.animation_mode = "system"
+            elif k == ord('1'): NFS.animation_mode = "pacman"
+            elif k == ord('2'): NFS.animation_mode = "starfield"
+            elif k == ord('3'): NFS.animation_mode = "cube"
+            elif k == ord('4'): NFS.animation_mode = "wave"
+
+        elif v == 4:
+            # Network view shortcuts can go here
+            pass
 
         elif v == 5:
             if k == ord('1'):   CS.mode = "day"
