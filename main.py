@@ -3392,10 +3392,18 @@ def v_neofetch(win, W, H):
     sd       = SD.snap()
 
     # ── Layout ────────────────────────────────────────────────────────────
-    AX     = 2          # logo left edge
-    AY     = 1          # logo top
-    LOGO_W = 26         # animation column width
-    IX     = AX + LOGO_W + 1   # info column starts here
+    _, main_w, _, _ = _responsive_layout(W)
+    frame_w = min(max(78, main_w - 4), 122)
+    frame_x = max(1, (main_w - frame_w) // 2)
+    frame_y = 1
+    frame_h = max(14, H - 5)
+
+    box(win, frame_y, frame_x, frame_h, frame_w, "SYSTEM OVERVIEW")
+
+    AX     = frame_x + 2                # logo left edge
+    AY     = frame_y + 1                # logo top
+    LOGO_W = min(26, max(22, frame_w // 4))
+    IX     = AX + LOGO_W + 2            # info column starts here
     KEY_W  = 11         # width of key label field
     VAL_X  = IX + KEY_W
 
@@ -3470,10 +3478,10 @@ def v_neofetch(win, W, H):
     # ── user@host header ──────────────────────────────────────────────────
     host      = sd.get("hostname", socket.gethostname())
     user_host = f"{user}@{host}"
-    max_info_w = max(1, W - VAL_X - 2)
+    max_info_w = max(1, (frame_x + frame_w - 2) - VAL_X)
 
-    put(win, AY,   IX, user_host[:W-IX-2], cp(P_HI, bold=True))
-    put(win, AY+1, IX, "─" * min(len(user_host), W-IX-2), cp(P_BOX))
+    put(win, AY,   IX, user_host[:max_info_w], cp(P_HI, bold=True))
+    put(win, AY+1, IX, "─" * min(len(user_host), max_info_w), cp(P_BOX))
 
     # ── info rows ─────────────────────────────────────────────────────────
     for i, (k, v) in enumerate(info):
@@ -3498,9 +3506,9 @@ def v_neofetch(win, W, H):
     # ── live resource bars (full width, below everything) ─────────────────
     bar_top = max(AY + logo_h + 1, pal_y + 3)
     bar_h   = 8
-    bw      = W - 8
-    if bar_top + bar_h < H - 2:
-        box(win, bar_top, 2, bar_h, W-4, "LIVE RESOURCES")
+    bw      = max(24, frame_w - 12)
+    if bar_top + bar_h < min(H - 2, frame_y + frame_h):
+        box(win, bar_top, frame_x + 2, bar_h, frame_w - 4, "LIVE RESOURCES")
         res_rows = [
             ("CPU  ", int(cpu_val),                              P_CYAN),
             ("MEM  ", int(mem_used / max(mem_total, 0.1) * 100), P_BLUE),
@@ -3512,9 +3520,10 @@ def v_neofetch(win, W, H):
         for i, (lbl, pct, col) in enumerate(res_rows):
             ry = bar_top + 1 + i
             if ry >= H - 2: break
-            put(win, ry, 4, lbl, cp(P_DIM))
-            hbar(win, ry, 9, bw, pct, col)
-            put(win, ry, 9+bw+1, f"{pct:3d}%", cp(col))
+            bar_x = frame_x + 4
+            put(win, ry, bar_x, lbl, cp(P_DIM))
+            hbar(win, ry, bar_x + 5, bw, pct, col)
+            put(win, ry, bar_x + 6 + bw, f"{pct:3d}%", cp(col))
 
     os_name = "Windows" if platform.system() == "Windows" else "Linux"
     mode_names = {"pacman": "Pac-Man", "starfield": "Starfield", "cube": "3D Cube", "wave": "Ocean Wave", "system": os_name}
@@ -3707,15 +3716,26 @@ def draw_footer(win, W, H):
 
 
 def _responsive_layout(W):
-    """Return (main_w, rail_x, rail_w) for wide-screen responsive mode."""
+    """Return (main_x, main_w, rail_x, rail_w) for balanced fullscreen layout."""
+    max_main_w = 132
+
     if W < 132:
-        return W, None, 0
-    rail_w = min(44, max(32, W // 4))
-    main_w = W - rail_w - 1
+        return 0, W, None, 0
+
+    rail_w = min(42, max(32, W // 4))
+    avail_main = W - rail_w - 1
+    main_w = min(avail_main, max_main_w)
+
     if main_w < 84:
-        return W, None, 0
-    rail_x = main_w + 1
-    return main_w, rail_x, rail_w
+        # Fallback: centered single pane with no side rail.
+        main_w = min(W, max_main_w)
+        main_x = max(0, (W - main_w) // 2)
+        return main_x, main_w, None, 0
+
+    total_w = main_w + 1 + rail_w
+    main_x = max(0, (W - total_w) // 2)
+    rail_x = main_x + main_w + 1
+    return main_x, main_w, rail_x, rail_w
 
 
 def _view_hint_lines():
@@ -7236,11 +7256,15 @@ def main(stdscr):
         tick()
         draw_topbar(stdscr, W)
 
-        main_w, rail_x, rail_w = _responsive_layout(W)
+        main_x, main_w, rail_x, rail_w = _responsive_layout(W)
         if rail_x is None:
-            VIEW_FNS[ST.view](stdscr, W, H)
+            if main_x == 0 and main_w == W:
+                VIEW_FNS[ST.view](stdscr, W, H)
+            else:
+                main_win = stdscr.derwin(H, main_w, 0, main_x)
+                VIEW_FNS[ST.view](main_win, main_w, H)
         else:
-            main_win = stdscr.derwin(H, main_w, 0, 0)
+            main_win = stdscr.derwin(H, main_w, 0, main_x)
             VIEW_FNS[ST.view](main_win, main_w, H)
             draw_side_rail(stdscr, rail_x, rail_w, H)
 
