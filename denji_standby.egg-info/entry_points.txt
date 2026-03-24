@@ -1,0 +1,3 @@
+[console_scripts]
+denji = main:run_denji
+standby = main:run_denji

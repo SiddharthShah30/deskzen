@@ -18,13 +18,39 @@ if platform.system() == "Windows":
 else:
     import curses
 
-import time, threading, socket, os, datetime, random, json, math, struct, shutil, atexit, hashlib
+import time, threading, socket, os, datetime, random, json, math, struct, shutil, atexit, hashlib, importlib
+from typing import Any, cast
 
 try:
     import psutil
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
+
+pyttsx3: Any = None
+sr: Any = None
+cv2: Any = None
+
+try:
+    pyttsx3 = importlib.import_module("pyttsx3")
+    HAS_TTS = True
+except Exception:
+    pyttsx3 = None
+    HAS_TTS = False
+
+try:
+    sr = importlib.import_module("speech_recognition")
+    HAS_SR = True
+except Exception:
+    sr = None
+    HAS_SR = False
+
+try:
+    cv2 = importlib.import_module("cv2")
+    HAS_CV2 = True
+except Exception:
+    cv2 = None
+    HAS_CV2 = False
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  COLOURS
@@ -958,7 +984,7 @@ def resolve_youtube(url):
     os.makedirs(CACHE_DIR, exist_ok=True)
     try:
         import yt_dlp
-        ydl_opts = {
+        ydl_opts: Any = {
             "format":         "bestaudio/best",
             "outtmpl":        os.path.join(CACHE_DIR, "%(id)s.%(ext)s"),
             "quiet":          True,
@@ -967,8 +993,10 @@ def resolve_youtube(url):
                                 "preferredcodec":"mp3",
                                 "preferredquality":"192"}],
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info   = ydl.extract_info(url, download=True)
+        with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
+            info = ydl.extract_info(url, download=True) or {}
+            if not isinstance(info, dict):
+                return None
             title  = (info.get("title") or "Unknown")[:40]
             artist = (info.get("uploader") or info.get("channel") or "YouTube")[:30]
             vid_id = info.get("id","unknown")
@@ -1241,16 +1269,23 @@ class AudioEngine:
             self._track_proc(proc)
             while self._alive(gen):
                 try:
-                    proc.stdin.write(genfn(self.CHUNK, state))
-                    proc.stdin.flush()
+                    pipe = proc.stdin
+                    if pipe is None:
+                        break
+                    pipe.write(genfn(self.CHUNK, state))
+                    pipe.flush()
                 except (BrokenPipeError, OSError):
                     break
                 time.sleep(self.CHUNK / SR * 0.5)
         except Exception:
             pass
         finally:
-            try: proc.stdin.close()
-            except: pass
+            try:
+                pipe = proc.stdin
+                if pipe is not None:
+                    pipe.close()
+            except:
+                pass
             try: proc.wait(timeout=2)
             except: proc.terminate()
             self._untrack_proc(proc)
@@ -1294,7 +1329,7 @@ class AudioEngine:
                     done = threading.Event()
                     wav  = tmp.name
                     def _play(p=wav, e=done):
-                        try: winsound.PlaySound(p, winsound.SND_FILENAME|winsound.SND_SYNC)
+                        try: winsound.PlaySound(p, winsound.SND_FILENAME)
                         except: pass
                         finally: e.set()
                     threading.Thread(target=_play, daemon=True).start()
@@ -1370,7 +1405,7 @@ class AudioEngine:
         try:
             done = threading.Event()
             def _pl(p=wav_path, e=done):
-                try: winsound.PlaySound(p, winsound.SND_FILENAME|winsound.SND_SYNC)
+                try: winsound.PlaySound(p, winsound.SND_FILENAME)
                 except: pass
                 finally: e.set()
             threading.Thread(target=_pl, daemon=True).start()
@@ -1954,14 +1989,18 @@ class VideoPlayer:
 
                 import yt_dlp
 
-                ydl_opts = {
+                ydl_opts: Any = {
                     "quiet":       True,
                     "no_warnings": True,
                     "format":      "best[height<=480]/bestvideo[height<=480]+bestaudio/best",
                     "noplaylist":  True,
                 }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
+                with yt_dlp.YoutubeDL(cast(Any, ydl_opts)) as ydl:
+                    info = ydl.extract_info(url, download=False) or {}
+
+                if not isinstance(info, dict):
+                    self.status = "could not parse video info"
+                    return
 
                 if not info:
                     self.status = "could not fetch video info"
@@ -1971,7 +2010,7 @@ class VideoPlayer:
                 stream_url = info.get("url") or info.get("manifest_url", "")
 
                 if not stream_url and info.get("formats"):
-                    fmts = info["formats"]
+                    fmts = list(info.get("formats") or [])
                     good = [f for f in fmts
                             if f.get("acodec","none") != "none"
                             and (f.get("height") or 999) <= 480]
@@ -2964,7 +3003,7 @@ def _cycle_view(cur, step):
 class State:
     def __init__(self):
         self.view       = 0
-        self.return_view = None
+        self.return_view: int | None = None
         self.todos      = load_todos()
         self.todo_cur   = 0
         self.todo_add   = False
@@ -2984,7 +3023,254 @@ class State:
         self._spec_smooth = [0.0]*32
         self._anim_t   = 0.0   # animation time counter
 
+
+class DenjiState:
+    def __init__(self):
+        self.input_mode = False
+        self.input_buf = ""
+        self.user_text = "Denji play music"
+        self.response_text = "Playing your music"
+        self.mood = "idle"          # idle | listening | processing | speaking
+        self.mood_until = 0.0
+        self.stage_queue = []
+        self.last_action = "Waiting for your command"
+        self.mic_status = "Ready" if HAS_SR else "Offline"
+        self.tts_status = "Ready" if HAS_TTS else "Offline"
+        self.camera_enabled = False
+        self.camera_status = "Ready" if HAS_CV2 else "Offline"
+        self.face_seen = False
+        self.camera_error = ""
+        self._camera_stop = threading.Event()
+        self._camera_thread: Any = None
+
+
+_DENJI_TTS_LOCK = threading.Lock()
+_DENJI_TTS_ENGINE = None
+
+
+def _denji_speak_worker(text):
+    global _DENJI_TTS_ENGINE
+    if not HAS_TTS:
+        DS.tts_status = "Offline"
+        return
+    try:
+        with _DENJI_TTS_LOCK:
+            if _DENJI_TTS_ENGINE is None:
+                _DENJI_TTS_ENGINE = pyttsx3.init()
+            DS.tts_status = "Speaking"
+            _DENJI_TTS_ENGINE.say(text)
+            _DENJI_TTS_ENGINE.runAndWait()
+            DS.tts_status = "Ready"
+    except Exception:
+        DS.tts_status = "Error"
+
+
+def denji_speak(text):
+    if not HAS_TTS:
+        return
+    threading.Thread(target=lambda t=text: _denji_speak_worker(t), daemon=True).start()
+
+
+def _denji_camera_loop():
+    if not HAS_CV2:
+        DS.camera_status = "Offline"
+        return
+
+    cap = None
+    face_cascade = None
+    try:
+        cap = cv2.VideoCapture(0)
+        if not cap or not cap.isOpened():
+            DS.camera_status = "Unavailable"
+            return
+
+        cascade_path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+        if os.path.exists(cascade_path):
+            face_cascade = cv2.CascadeClassifier(cascade_path)
+
+        DS.camera_status = "Active"
+        while not DS._camera_stop.is_set():
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                DS.face_seen = False
+                time.sleep(0.08)
+                continue
+
+            seen = False
+            if face_cascade is not None and not face_cascade.empty():
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(40, 40))
+                seen = len(faces) > 0
+            DS.face_seen = seen
+            time.sleep(0.08)
+    except Exception as e:
+        DS.camera_error = str(e)
+        DS.camera_status = "Error"
+    finally:
+        DS.camera_enabled = False
+        DS.face_seen = False
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+
+def denji_toggle_camera():
+    if not HAS_CV2:
+        DS.response_text = "Camera module not installed"
+        DS.last_action = "Install opencv-python for camera"
+        DS.camera_status = "Offline"
+        return
+
+    if DS.camera_enabled:
+        DS._camera_stop.set()
+        DS.camera_enabled = False
+        DS.camera_status = "Stopped"
+        DS.last_action = "Camera stopped"
+        return
+
+    DS._camera_stop = threading.Event()
+    DS.camera_enabled = True
+    DS.camera_error = ""
+    DS._camera_thread = threading.Thread(target=_denji_camera_loop, daemon=True)
+    DS._camera_thread.start()
+    DS.last_action = "Camera started"
+
+
+def _denji_listen_worker():
+    if not HAS_SR:
+        DS.mic_status = "Offline"
+        DS.response_text = "Microphone STT is offline"
+        DS.last_action = "Install SpeechRecognition and PyAudio"
+        return
+    try:
+        DS.mic_status = "Listening"
+        recognizer = sr.Recognizer()
+        with sr.Microphone() as source:
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            audio = recognizer.listen(source, timeout=4, phrase_time_limit=6)
+        text = recognizer.recognize_google(audio)
+        DS.mic_status = "Ready"
+        if text.strip():
+            cmd = text.strip()
+            if not cmd.lower().startswith("denji"):
+                cmd = f"Denji {cmd}"
+            denji_submit_command(cmd)
+    except Exception:
+        DS.mic_status = "Ready" if HAS_SR else "Offline"
+        DS.response_text = "I could not catch that. Try typing command with T."
+        DS.last_action = "Voice listen timeout/failure"
+
+
+def denji_listen_once():
+    if not HAS_SR:
+        DS.input_mode = True
+        DS.input_buf = "Denji play music"
+        DS.mood = "listening"
+        DS.mood_until = time.time() + 0.5
+        DS.stage_queue = [("idle", 0.0)]
+        return
+    DS.mood = "listening"
+    DS.mood_until = time.time() + 0.7
+    DS.stage_queue = [("processing", 0.6), ("idle", 0.0)]
+    threading.Thread(target=_denji_listen_worker, daemon=True).start()
+
+
+def denji_shutdown():
+    if DS.camera_enabled:
+        DS._camera_stop.set()
+        DS.camera_enabled = False
+    DS.camera_status = "Stopped" if HAS_CV2 else "Offline"
+
+
+def denji_face(mood):
+    faces = {
+        "idle": "( o_o )",
+        "listening": "( •_• )",
+        "processing": "( -_- )",
+        "speaking": "( ^‿^ )",
+    }
+    return faces.get(mood, "( o_o )")
+
+
+def denji_submit_command(cmd):
+    raw = (cmd or "").strip()
+    if not raw:
+        return
+
+    c = raw.lower()
+    if c.startswith("denji "):
+        c = c[6:].strip()
+
+    DS.user_text = raw
+    DS.mood = "listening"
+    DS.mood_until = time.time() + 0.55
+    DS.stage_queue = [("processing", 0.85), ("speaking", 1.4), ("idle", 0.0)]
+
+    if "play" in c and "music" in c:
+        if not AUDIO.playing:
+            AUDIO.toggle_play()
+        DS.response_text = "Playing your music"
+        DS.last_action = "Music playback started"
+    elif "pause" in c and "music" in c:
+        if AUDIO.playing:
+            AUDIO.toggle_play()
+        DS.response_text = "Pausing your music"
+        DS.last_action = "Music playback paused"
+    elif "next" in c and ("track" in c or "song" in c or "music" in c):
+        AUDIO.next_track()
+        DS.response_text = "Skipping to the next track"
+        DS.last_action = "Advanced to next track"
+    elif "focus" in c:
+        ST.pomo_run = True
+        ST._pw = time.time()
+        DS.response_text = "Starting focus mode"
+        DS.last_action = "Pomodoro session started"
+    elif "calendar" in c:
+        ST.view = 5
+        DS.response_text = "Opening your calendar"
+        DS.last_action = "Switched to calendar view"
+    elif "network" in c:
+        ST.view = 4
+        DS.response_text = "Opening network overview"
+        DS.last_action = "Switched to network view"
+    elif "video" in c:
+        ST.view = 6
+        DS.response_text = "Opening video panel"
+        DS.last_action = "Switched to video view"
+    elif "news" in c:
+        ST.view = HUB_VIEW_IDX
+        DS.response_text = "Opening news and market hub"
+        DS.last_action = "Switched to news hub"
+    elif "system" in c and "snapshot" in c:
+        ST.view = 3
+        DS.response_text = "Opening system overview"
+        DS.last_action = "Switched to neofetch view"
+    else:
+        DS.response_text = "I got that. Tell me what to run next."
+        DS.last_action = "Command understood, waiting for exact action"
+
+    denji_speak(DS.response_text)
+
+
+def denji_tick():
+    if DS.mood_until <= 0:
+        return
+    now = time.time()
+    if now < DS.mood_until:
+        return
+
+    if DS.stage_queue:
+        nxt, dur = DS.stage_queue.pop(0)
+        DS.mood = nxt
+        DS.mood_until = (now + dur) if dur > 0 else 0.0
+    else:
+        DS.mood = "idle"
+        DS.mood_until = 0.0
+
 ST = State()
+DS = DenjiState()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  TICK
@@ -2995,6 +3281,7 @@ def tick():
 
     # Advance animation time
     ST._anim_t += 0.05
+    denji_tick()
 
     if ST.pomo_run:
         dt = now - ST._pw
@@ -3026,119 +3313,113 @@ def v_dashboard(win, W, H):
     sd  = SD.snap()
 
     def _clip(s, n):
-        return s if len(s) <= n else s[:max(1, n-1)] + "…"
+        return s if len(s) <= n else s[:max(1, n-1)] + "..."
 
-    # Compact fallback for very small terminals.
-    if W < 90 or H < 26:
-        v_clock(win, W, H)
+    if W < 98 or H < 28:
+        box(win, 1, 0, H - 2, W - 1, "DENJI")
+        face = denji_face(DS.mood)
+        centre(win, 3, face, cp(P_CYAN, bold=True))
+        centre(win, 5, f'User: "{_clip(DS.user_text, max(8, W-10))}"', cp(P_DIM))
+        centre(win, 6, f'Denji: "{_clip(DS.response_text, max(8, W-10))}"', cp(P_GREEN))
+        prompt = DS.input_buf if DS.input_mode else "denji play music"
+        put(win, H - 4, 2, _clip(f"> {prompt}", max(8, W - 6)), cp(P_AMBER, bold=True))
+        put(win, H - 1, 0, " [t] type  [enter] send  [space] play/pause  [<- ->] views  [q] quit ", cp(P_DIM))
         return
 
-    # Balanced geometry with larger visualizer area.
-    lw = W // 2
-    rw = W - lw - 1
-    top_h = 9
-    body_h = 11
-    gap = 1
+    header_h = 3
+    core_y = 1 + header_h
+    core_h = H - 12
+    bottom_y = core_y + core_h
+    bottom_h = H - bottom_y - 1
 
-    # ── Top full-width: Clock + top news + next upcoming event ──────────────
-    box(win, 1, 0, top_h, W - 1, "CLOCK + NEXT UPCOMING EVENT")
+    box(win, 1, 0, header_h, W - 1, "DENJI DASHBOARD")
+    put(win, 2, 2, now.strftime("%A %d %b %Y  %H:%M:%S"), cp(P_HI))
+    put(win, 2, W - 30, f"CPU {sd.get('cpu', 0.0):4.0f}%  MEM {sd.get('mem_pct', 0.0):4.0f}%", cp(P_DIM))
 
-    split_x = lw
-    for yy in range(2, top_h):
-        put(win, yy, split_x, "│", cp(P_BOX))
+    left_w = max(24, W // 4)
+    mid_w = max(38, W // 2)
+    right_w = max(24, (W - 1) - left_w - mid_w)
+    left_x = 0
+    mid_x = left_x + left_w
+    right_x = mid_x + mid_w
 
-    left_w = max(10, lw - 4)
-    right_w = max(10, rw - 4)
+    box(win, core_y, left_x, core_h, left_w, "QUICK ACTIONS")
+    quick = [
+        "[1] Play Music",
+        "[2] Focus Mode",
+        "[3] Show Calendar",
+        "[4] Start Video",
+        "[5] News Snapshot",
+        "[6] System Snapshot",
+    ]
+    for i, line in enumerate(quick):
+        put(win, core_y + 2 + i, left_x + 2, _clip(line, left_w - 4), cp(P_CYAN if i < 4 else P_MID))
 
-    ts = now.strftime("%H:%M")
-    big_time(win, 2, max(1, (lw - btw(ts)) // 2), ts)
-    put(win, 6, 2, now.strftime("%A, %b %d").upper(), cp(P_DIM))
+    box(win, core_y, mid_x, core_h, mid_w, "DENJI CORE")
+    face = denji_face(DS.mood)
+    mood_label = DS.mood.upper()
+    centre(win, core_y + 3, face, cp(P_CYAN, bold=True))
+    centre(win, core_y + 5, f"State: {mood_label}", cp(P_MID))
+    centre(win, core_y + 7, f'User: "{_clip(DS.user_text, max(8, mid_w-8))}"', cp(P_DIM))
+    centre(win, core_y + 9, f'Denji: "{_clip(DS.response_text, max(8, mid_w-8))}"', cp(P_GREEN, bold=True))
 
+    wave_y = core_y + max(11, core_h - 6)
+    if wave_y < core_y + core_h - 1:
+        usable = max(10, mid_w - 6)
+        bars = list(ST._spec_smooth[:min(usable // 2, len(ST._spec_smooth))])
+        sx = mid_x + 3
+        for i, v in enumerate(bars):
+            lvl = max(1, min(8, int(v * 8) + 1))
+            put(win, wave_y, sx + i * 2, "▁▂▃▄▅▆▇█"[lvl - 1], cp(P_BLUE))
+
+    box(win, core_y, right_x, core_h, right_w, "LIVE STATUS")
     bat = sd.get("bat_pct", 0)
-    cpu = sd.get("cpu", 0.0)
-    mem = sd.get("mem_pct", 0.0)
-    disk = sd.get("disk_pct", 0.0)
+    bat_plug = sd.get("bat_plug", False)
+    mcol = P_GREEN if DS.mic_status == "Listening" else P_DIM
+    ccol = P_GREEN if DS.camera_status == "Active" else P_DIM
+    fcol = P_GREEN if DS.face_seen else P_MID
+    tcol = P_GREEN if DS.tts_status == "Speaking" else P_DIM
+    put(win, core_y + 2, right_x + 2, f"Mic: {DS.mic_status}", cp(mcol))
+    put(win, core_y + 3, right_x + 2, f"Camera: {DS.camera_status}", cp(ccol))
+    put(win, core_y + 4, right_x + 2, f"Face: {'Detected' if DS.face_seen else 'Not detected'}", cp(fcol))
+    put(win, core_y + 5, right_x + 2, f"Mood: {DS.mood}", cp(P_CYAN))
+    put(win, core_y + 6, right_x + 2, f"Voice: {DS.tts_status}", cp(tcol))
+    put(win, core_y + 7, right_x + 2, f"Net: {kbfmt(sd.get('net_dn', 0))}", cp(P_MID))
+    put(win, core_y + 8, right_x + 2, f"Battery: {bat}% {'+' if bat_plug else ''}", cp(P_AMBER))
+    put(win, core_y + 9, right_x + 2, "Workflow", cp(P_HI, bold=True))
+    put(win, core_y + 10, right_x + 2, "1. Listening", cp(P_DIM))
+    put(win, core_y + 11, right_x + 2, "2. Processing", cp(P_DIM))
+    put(win, core_y + 12, right_x + 2, "3. Speaking", cp(P_DIM))
 
-    evtitle, evtime = next_event()
-    ev_date = "No upcoming date"
-    with _CAL_LOCK:
-        evs = list(_CAL_EVENTS)
-    for start, end, title in evs:
-        if end >= now:
-            ev_date = start.strftime("%a, %b %d")
-            if start <= now <= end:
-                evtime = "ongoing"
-            break
+    if bottom_h >= 5:
+        col_w = (W - 1) // 3
+        bx1, bx2, bx3 = 0, col_w, col_w * 2
+        bw1 = col_w
+        bw2 = col_w
+        bw3 = (W - 1) - bx3
 
-    items = get_news_items()
-    top_news = items[0].get("title", "No news available") if items else "No news available"
-    put(win, 2, lw + 2, "TOP NEWS", cp(P_CYAN, bold=True))
-    put(win, 3, lw + 2, _clip(top_news, right_w), cp(P_HI))
-    put(win, 5, lw + 2, "NEXT EVENT", cp(P_CYAN, bold=True))
-    put(win, 6, lw + 2, _clip(evtitle, right_w), cp(P_MID))
-    put(win, 7, lw + 2, _clip(f"{ev_date}  |  {evtime}", right_w), cp(P_DIM))
+        box(win, bottom_y, bx1, bottom_h, bw1, "COMMAND INPUT")
+        prompt = DS.input_buf if DS.input_mode else "denji play music"
+        blink = "_" if (DS.input_mode and int(time.time() * 2) % 2 == 0) else ""
+        put(win, bottom_y + 1, bx1 + 2, _clip(f"> {prompt}{blink}", max(8, bw1 - 4)), cp(P_AMBER, bold=True))
+        put(win, bottom_y + 2, bx1 + 2, "[Enter] send  [T] type  [V] listen  [C] camera", cp(P_DIM))
+        put(win, bottom_y + 3, bx1 + 2, "Try: Denji play music", cp(P_DIM))
 
-    # ── Middle body: To-Dos (left, full) | System Info (right, full) ───────
-    y1 = 1 + top_h + gap
-    box(win, y1, 0, body_h, lw, "TO-DOS")
+        box(win, bottom_y, bx2, bottom_h, bw2, "ACTIVE TASK")
+        put(win, bottom_y + 1, bx2 + 2, _clip(f"Running: {DS.last_action}", max(8, bw2 - 4)), cp(P_HI))
+        put(win, bottom_y + 2, bx2 + 2, f"Music: {'Playing' if AUDIO.playing else 'Paused'}", cp(P_GREEN if AUDIO.playing else P_AMBER))
+        put(win, bottom_y + 3, bx2 + 2, _clip(f'Last: "{DS.response_text}"', max(8, bw2 - 4)), cp(P_DIM))
 
-    # Input line anchored near the top while adding a task.
-    list_start_y = y1 + 1
-    if ST.todo_add:
-        put(win, y1 + 1, 2,
-            _clip(f"+ {ST.todo_buf}{'█' if int(time.time()*2)%2 else ' '}", max(8, lw - 4)), cp(P_AMBER))
-        list_start_y = y1 + 2
-
-    list_rows = max(2, (y1 + body_h - 2) - list_start_y + 1)
-    start = max(0, ST.todo_cur - list_rows + 1) if len(ST.todos) > list_rows else 0
-    for i, (done, text) in enumerate(ST.todos[start:start + list_rows]):
-        ri = start + i
-        yy = list_start_y + i
-        if yy >= y1 + body_h - 1:
-            break
-        sel = (ri == ST.todo_cur)
-        tick = "✓" if done else " "
-        col = P_DIM if done else (P_AMBER if sel else P_HI)
-        line = f" [{'▶' if sel else ' '}] [{tick}] {_clip(text, max(8, lw - 12))}"
-        put(win, yy, 2, line[:max(1, lw - 4)], cp(col))
-
-    done_n = sum(1 for d, _ in ST.todos if d)
-    put(win, y1 + body_h - 2, 2,
-        _clip(f"Done {done_n}/{len(ST.todos)}", max(8, lw - 4)), cp(P_DIM))
-
-    box(win, y1, lw, body_h, rw, "SYSTEM INFO")
-    plug = sd.get("bat_plug", False)
-    bc = P_GREEN if bat > 40 else (P_AMBER if bat > 15 else P_RED)
-    bw = max(4, rw - 15)
-    uh, rem = divmod(int(sd.get("uptime", 0)), 3600)
-    um = rem // 60
-
-    put(win, y1 + 1, lw + 2, f"BAT {'+' if plug else ' '}{bat:3d}%", cp(bc, bold=True))
-    hbar(win, y1 + 1, lw + 12, bw, bat, bc)
-    put(win, y1 + 2, lw + 2, f"CPU {cpu:4.0f}%", cp(P_CYAN))
-    hbar(win, y1 + 2, lw + 12, bw, int(cpu), P_CYAN)
-    put(win, y1 + 3, lw + 2, f"MEM {mem:4.0f}%", cp(P_BLUE))
-    hbar(win, y1 + 3, lw + 12, bw, int(mem), P_BLUE)
-    put(win, y1 + 4, lw + 2, f"DSK {disk:4.0f}%", cp(P_AMBER))
-    hbar(win, y1 + 4, lw + 12, bw, int(disk), P_AMBER)
-    put(win, y1 + 5, lw + 2, _clip(f"UPTIME  {uh}h {um:02d}m", max(10, rw - 4)), cp(P_DIM))
-    put(win, y1 + 6, lw + 2, _clip(f"SSID    {sd.get('ssid', 'N/A')}", max(10, rw - 4)), cp(P_DIM))
-    put(win, y1 + 7, lw + 2,
-        _clip(f"NET DN  {kbfmt(sd.get('net_dn', 0))}", max(10, rw - 4)), cp(P_DIM))
-    put(win, y1 + 8, lw + 2,
-        _clip(f"NET UP  {kbfmt(sd.get('net_up', 0))}", max(10, rw - 4)), cp(P_DIM))
-    put(win, y1 + 9, lw + 2,
-        _clip(f"HOST    {sd.get('hostname', 'N/A')}", max(10, rw - 4)), cp(P_DIM))
-
-    # ── Bottom full-width: Larger visualizer ─────────────────────────────────
-    y3 = y1 + body_h + gap
-    if y3 < H - 2:
-        vis_h = max(7, H - y3 - 1)
-        box(win, y3, 0, vis_h, W - 1, "MUSIC VISUALIZER")
-        draw_spectrum(win, y3 + 1, 1, max(2, vis_h - 2), max(4, W - 3), list(ST._spec_smooth))
+        box(win, bottom_y, bx3, bottom_h, bw3, "EVENT FEED")
+        evtitle, evtime = next_event()
+        items = get_news_items()
+        top_news = items[0].get("title", "No news available") if items else "No news available"
+        put(win, bottom_y + 1, bx3 + 2, _clip(f"Event: {evtitle}", max(8, bw3 - 4)), cp(P_MID))
+        put(win, bottom_y + 2, bx3 + 2, _clip(f"Time: {evtime}", max(8, bw3 - 4)), cp(P_DIM))
+        put(win, bottom_y + 3, bx3 + 2, _clip(f"News: {top_news}", max(8, bw3 - 4)), cp(P_MID))
 
     put(win, H-1, 0,
-        " [ENTER]=check  [a] add todo  [d] del todo  [p] pomo  [r] reset  [space]=music  [q] quit ",
+        " [t] type command  [enter] send  [v] voice  [c] camera  [1-6] quick actions  [space] music  [<- ->] views  [q] quit ",
         cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3149,7 +3430,15 @@ def v_clock(win, W, H):
     n = len(lib)
 
     if W < 90 or H < 24:
-        v_clock(win, W, H)
+        box(win, 1, 0, H - 2, W - 1, "MUSIC")
+        td = AUDIO.current if lib else {"name": "No track", "artist": "-", "duration": 0}
+        centre(win, 3, td.get("name", "No track")[:max(8, W - 8)], cp(P_HI, bold=True))
+        centre(win, 5, td.get("artist", "")[:max(8, W - 8)], cp(P_DIM))
+        st = "Playing" if AUDIO.playing else "Paused"
+        centre(win, 7, f"State: {st}", cp(P_GREEN if AUDIO.playing else P_AMBER))
+        if H > 13:
+            draw_spectrum(win, 9, 2, max(2, H - 14), max(4, W - 4), ST._spec_smooth)
+        put(win, H - 1, 0, " [space] play/pause  [z/x] prev/next  [<- ->] views  [q] quit ", cp(P_DIM))
         return
 
     put(win, 1, 2, "MUSIC DASHBOARD", cp(P_HI, bold=True) | curses.A_BOLD)
@@ -3407,17 +3696,8 @@ def v_neofetch(win, W, H):
     KEY_W  = 11         # width of key label field
     VAL_X  = IX + KEY_W
 
-    # ── Animated logo (select based on mode) ───────────────────────────────
-    if NFS.animation_mode == "system":
-        logo_h = draw_system_logo(win, AY, AX)
-    elif NFS.animation_mode == "starfield":
-        logo_h = draw_starfield_logo(win, AY, AX, ST._anim_t)
-    elif NFS.animation_mode == "cube":
-        logo_h = draw_cube_anim(win, AY, AX, ST._anim_t)
-    elif NFS.animation_mode == "wave":
-        logo_h = draw_wave_anim(win, AY, AX, ST._anim_t)
-    else:  # pacman (default)
-        logo_h = draw_animated_logo(win, AY, AX, ST._anim_t)
+    # Pac-Man only
+    logo_h = draw_animated_logo(win, AY, AX, ST._anim_t)
 
     # ── Collect all values ────────────────────────────────────────────────
     uh, rem   = divmod(sd.get("uptime", 0), 3600)
@@ -3525,11 +3805,8 @@ def v_neofetch(win, W, H):
             hbar(win, ry, bar_x + 5, bw, pct, col)
             put(win, ry, bar_x + 6 + bw, f"{pct:3d}%", cp(col))
 
-    os_name = "Windows" if platform.system() == "Windows" else "Linux"
-    mode_names = {"pacman": "Pac-Man", "starfield": "Starfield", "cube": "3D Cube", "wave": "Ocean Wave", "system": os_name}
-    mode_display = mode_names.get(NFS.animation_mode, "Unknown")
     put(win, H-1, 0,
-        f" neofetch · {mode_display} · [0] OS  [1] Pac-Man  [2] Starfield  [3] Cube  [4] Wave  [←→] views  [q] quit ",
+        " neofetch · Pac-Man · [<- ->] views  [q] quit ",
         cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3838,7 +4115,7 @@ class CalState:
     date      = datetime.datetime.now().date()
     add_mode  = False
     add_step  = 0
-    add_date  = None
+    add_date  = datetime.datetime.now().date()
     add_hour  = 9
     add_min   = 0
     add_title = ""
@@ -4851,12 +5128,24 @@ def handle_key(k):
 
     # Check if ANY input mode is active - if so, ONLY handle input-specific keys
     # This prevents shortcuts from interfering with text input
-    input_mode_active = (ST.todo_add or 
+    input_mode_active = (DS.input_mode or ST.todo_add or 
                          (v == 5 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode)) or 
                          (v in (1, 5) and LS.mode in ("add_url", "add_file")) or 
                          (v == 6 and VS.mode in ("add_url", "add_file")) or
                          (v == 8 and NSS.stock_input) or
                          (v == 9 and ECS.input_mode))
+
+    if v == 0 and DS.input_mode:
+        if k in (10, 13):
+            denji_submit_command(DS.input_buf)
+            DS.input_mode = False
+            DS.input_buf = ""
+        elif k == 27:
+            DS.input_mode = False
+            DS.input_buf = ""
+        else:
+            DS.input_buf = _text_input(DS.input_buf, k)
+        return
 
     if ST.todo_add:
         if k in (10, 13):
@@ -4986,6 +5275,17 @@ def handle_key(k):
             _force_stop_all_media()
             return
         if k == ord(' ') and v != 0: AUDIO.toggle_play(); return
+        if v == 0 and k in (ord('t'), ord('T'), ord('/')):
+            DS.input_mode = True
+            if not DS.input_buf:
+                DS.input_buf = "Denji play music"
+            return
+        if v == 0 and k in (ord('v'), ord('V')):
+            denji_listen_once()
+            return
+        if v == 0 and k in (ord('c'), ord('C')):
+            denji_toggle_camera()
+            return
         if k in (ord('z'), ord('Z')):             AUDIO.prev_track();  return
         if k in (ord('x'), ord('X')):             AUDIO.next_track();  return
         if k in (ord('s'), ord('S')) and v != 2: AUDIO.shuffle = not AUDIO.shuffle; return
@@ -4994,19 +5294,22 @@ def handle_key(k):
     # Skip view-specific shortcuts if in input mode
     if not input_mode_active:
         if v == 0:
-            if k in (curses.KEY_UP,   ord('k')): ST.todo_cur = max(0, ST.todo_cur - 1)
-            elif k in (curses.KEY_DOWN, ord('j')): ST.todo_cur = min(len(ST.todos)-1, ST.todo_cur+1)
-            elif k in (10, 13) and ST.todos:
-                ST.todos[ST.todo_cur][0] ^= True
-                save_todos(ST.todos)
-            elif k == ord(' '):  AUDIO.toggle_play()
-            elif k == ord('a'): ST.todo_add = True; ST.todo_buf = ""
-            elif k == ord('d') and ST.todos:
-                ST.todos.pop(ST.todo_cur)
-                ST.todo_cur = max(0, min(ST.todo_cur, len(ST.todos)-1))
-                save_todos(ST.todos)
-            elif k == ord('p'): ST.pomo_run = not ST.pomo_run; ST._pw = time.time()
-            elif k == ord('r'): ST.pomo_run = False; ST.pomo_secs = ST.pomo_total; ST._pw = time.time()
+            if k in (ord('1'),):
+                denji_submit_command("Denji play music")
+            elif k in (ord('2'),):
+                denji_submit_command("Denji focus mode")
+            elif k in (ord('3'),):
+                denji_submit_command("Denji open calendar")
+            elif k in (ord('4'),):
+                denji_submit_command("Denji open video")
+            elif k in (ord('5'),):
+                denji_submit_command("Denji show news")
+            elif k in (ord('6'),):
+                denji_submit_command("Denji system snapshot")
+            elif k == ord(' '):
+                AUDIO.toggle_play()
+                DS.response_text = "Toggled music playback"
+                DS.last_action = "Music toggle"
 
         elif v == 2:
             if k == ord('p'):   ST.pomo_run = not ST.pomo_run; ST._pw = time.time()
@@ -5080,12 +5383,7 @@ def handle_key(k):
                     LS.mode = "browse"
 
         elif v == 3:
-            # Neofetch animation switching
-            if k == ord('0'):   NFS.animation_mode = "system"
-            elif k == ord('1'): NFS.animation_mode = "pacman"
-            elif k == ord('2'): NFS.animation_mode = "starfield"
-            elif k == ord('3'): NFS.animation_mode = "cube"
-            elif k == ord('4'): NFS.animation_mode = "wave"
+            NFS.animation_mode = "pacman"
 
         elif v == 4:
             # Network view shortcuts can go here
@@ -7216,6 +7514,7 @@ VIEW_FNS = [v_dashboard, v_clock, v_focus, v_neofetch, v_network,
 
 def _in_text_input_mode():
     v = ST.view
+    if v == 0 and DS.input_mode:                                 return True
     if ST.todo_add:                                              return True
     if v == 5 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode):  return True
     if v in (1, 5) and LS.mode in ("add_url", "add_file"):       return True
@@ -7281,13 +7580,14 @@ def main(stdscr):
             if k == ord('q') and not in_text:
                 VIDEO.stop()
                 AUDIO._kill()
+                denji_shutdown()
                 save_todos(ST.todos)
                 return
             handle_key(k)
             in_text = _in_text_input_mode()
 
 
-if __name__ == "__main__":
+def run_denji():
     backend = AUDIO._backend or ""
     if not backend:
         print("""
@@ -7311,8 +7611,8 @@ if __name__ == "__main__":
     else:
         bname = os.path.basename(backend) if os.path.isfile(backend) else backend
         print(f"""
-  Terminal StandBy  |  audio: {bname}  |  {platform.system()}
-  SPACE=play/pause  z/x=prev/next  ←/→=views  q=quit
+  Denji StandBy  |  audio: {bname}  |  {platform.system()}
+  SPACE=play/pause  z/x=prev/next  <-/->=views  q=quit
 """)
     time.sleep(0.3)
     try:
@@ -7320,7 +7620,12 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     finally:
+        denji_shutdown()
         AUDIO._kill()
         save_todos(ST.todos)
     print("\n  Goodbye! Todos saved.  [*]\n")
+
+
+if __name__ == "__main__":
+    run_denji()
     

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "denji-standby"
+version = "0.1.0"
+description = "Denji TUI standby dashboard"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+denji = "main:run_denji"
+standby = "main:run_denji"
+
+[tool.setuptools]
+py-modules = ["main"]

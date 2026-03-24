@@ -1,0 +1,8 @@
+README.md
+main.py
+pyproject.toml
+denji_standby.egg-info/PKG-INFO
+denji_standby.egg-info/SOURCES.txt
+denji_standby.egg-info/dependency_links.txt
+denji_standby.egg-info/entry_points.txt
+denji_standby.egg-info/top_level.txt
