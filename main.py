@@ -3030,7 +3030,7 @@ class DenjiState:
         self.input_buf = ""
         self.user_text = "Denji play music"
         self.response_text = "Playing your music"
-        self.mood = "idle"          # idle | listening | processing | speaking
+        self.mood = "idle"          # idle | listening | processing | speaking | happy | sad
         self.mood_until = 0.0
         self.stage_queue = []
         self.last_action = "Waiting for your command"
@@ -3039,6 +3039,12 @@ class DenjiState:
         self.camera_enabled = False
         self.camera_status = "Ready" if HAS_CV2 else "Offline"
         self.face_seen = False
+        self.face_last_seen = 0.0
+        self.user_away_secs = 0.0
+        self.face_x = 0.0            # normalized [-1, 1], from camera center
+        self.face_y = 0.0            # normalized [-1, 1], from camera center
+        self.eye_x = 0               # tui eye offset x
+        self.eye_y = 0               # tui eye offset y
         self.camera_error = ""
         self._camera_stop = threading.Event()
         self._camera_thread: Any = None
@@ -3101,6 +3107,19 @@ def _denji_camera_loop():
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(40, 40))
                 seen = len(faces) > 0
+                if seen:
+                    # Track the largest detected face so eye movement feels stable.
+                    fx, fy, fw, fh = sorted(faces, key=lambda f: (f[2] * f[3]), reverse=True)[0]
+                    h, w = gray.shape[:2]
+                    cx = fx + fw / 2.0
+                    cy = fy + fh / 2.0
+                    nx = ((cx / max(1.0, float(w))) - 0.5) * 2.0
+                    ny = ((cy / max(1.0, float(h))) - 0.5) * 2.0
+                    DS.face_x = max(-1.0, min(1.0, nx))
+                    DS.face_y = max(-1.0, min(1.0, ny))
+                    DS.eye_x = int(round(DS.face_x * 1.5))
+                    DS.eye_y = int(round(DS.face_y * 1.0))
+                    DS.face_last_seen = time.time()
             DS.face_seen = seen
             time.sleep(0.08)
     except Exception as e:
@@ -3185,13 +3204,26 @@ def denji_shutdown():
 
 
 def denji_face(mood):
-    faces = {
-        "idle": "( o_o )",
-        "listening": "( •_• )",
-        "processing": "( -_- )",
-        "speaking": "( ^‿^ )",
-    }
-    return faces.get(mood, "( o_o )")
+    if mood == "speaking":
+        return "( ^‿^ )"
+    if mood == "processing":
+        return "( -_- )"
+    if mood == "listening":
+        return "( •_• )"
+    if mood == "happy":
+        return "( ^_^ )"
+    if mood == "sad":
+        return "( ;_; )"
+
+    # Idle: eyes look toward tracked user position.
+    eye_set = ["o", "O", "0"]
+    idx = 0
+    if DS.eye_x >= 1:
+        idx = 1
+    elif DS.eye_x <= -1:
+        idx = 2
+    e = eye_set[idx]
+    return f"( {e}_{e} )"
 
 
 def denji_submit_command(cmd):
@@ -3266,7 +3298,18 @@ def denji_tick():
         DS.mood = nxt
         DS.mood_until = (now + dur) if dur > 0 else 0.0
     else:
-        DS.mood = "idle"
+        # Presence-based idle mood after active animation pipeline finishes.
+        if DS.camera_enabled and HAS_CV2:
+            away = now - DS.face_last_seen if DS.face_last_seen else 999.0
+            DS.user_away_secs = max(0.0, away)
+            if away <= 1.8:
+                DS.mood = "happy"
+            elif away >= 3.8:
+                DS.mood = "sad"
+            else:
+                DS.mood = "idle"
+        else:
+            DS.mood = "idle"
         DS.mood_until = 0.0
 
 ST = State()
@@ -3302,124 +3345,202 @@ def tick():
     raw = AUDIO.get_spectrum(32)
     ST._spec_smooth = [0.6*s + 0.4*r for s,r in zip(ST._spec_smooth, raw)]
 
+def ios_style_clock(now):
+    """Render iOS-style digital clock with large digits and clean design."""
+    hour = now.hour
+    minute = now.minute
+    second = now.second
+    ampm = "AM" if hour < 12 else "PM"
+    display_hour = hour % 12 if hour % 12 != 0 else 12
+    
+    # Format time with leading zeros
+    time_str = f"{display_hour:02d}:{minute:02d}:{second:02d}"
+    date_str = now.strftime("%A, %B %d, %Y")
+    
+    return {
+        "time": time_str,
+        "ampm": ampm,
+        "date": date_str,
+        "hour_24": f"{hour:02d}:{minute:02d}:{second:02d}"
+    }
+
+
+def ascii_clock_lines(time_text):
+    """Render a large ASCII clock from HH:MM:SS text."""
+    glyphs = {
+        "0": [" __ ", "|  |", "|  |", "|  |", "|__|"],
+        "1": ["    ", "   |", "   |", "   |", "   |"],
+        "2": [" __ ", "   |", " __|", "|   ", "|__ "],
+        "3": [" __ ", "   |", " __|", "   |", " __|"],
+        "4": ["    ", "|  |", "|__|", "   |", "   |"],
+        "5": [" __ ", "|   ", "|__ ", "   |", " __|"],
+        "6": [" __ ", "|   ", "|__ ", "|  |", "|__|"],
+        "7": [" __ ", "   |", "   |", "   |", "   |"],
+        "8": [" __ ", "|  |", "|__|", "|  |", "|__|"],
+        "9": [" __ ", "|  |", "|__|", "   |", " __|"],
+        ":": ["    ", " .. ", "    ", " .. ", "    "],
+        " ": ["    ", "    ", "    ", "    ", "    "],
+    }
+    rows = ["", "", "", "", ""]
+    for ch in time_text:
+        g = glyphs.get(ch, glyphs[" "])
+        for i in range(5):
+            rows[i] += g[i] + " "
+    return rows
+
 def next_event():
     return get_next_event()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  VIEW 1 — DASHBOARD
+#  VIEW 1 — DASHBOARD (REVAMPED)
 # ══════════════════════════════════════════════════════════════════════════════
 def v_dashboard(win, W, H):
     now = datetime.datetime.now()
     sd  = SD.snap()
+    clock_data = ios_style_clock(now)
 
     def _clip(s, n):
-        return s if len(s) <= n else s[:max(1, n-1)] + "..."
+        return s if len(s) <= n else s[:max(1, n-1)] + "..."  
 
-    if W < 98 or H < 28:
-        box(win, 1, 0, H - 2, W - 1, "DENJI")
+    def _marquee(msg, w, speed=4.0):
+        if w <= 1:
+            return ""
+        txt = (msg or "").strip()
+        if len(txt) <= w:
+            return txt
+        pad = "   "
+        loop = txt + pad
+        off = int(time.time() * speed) % len(loop)
+        view = (loop + loop)[off:off + w]
+        return view
+
+    # Fallback for very small terminals - still show all panels, just stacked
+    if W < 100 or H < 26:
+        box(win, 1, 0, H - 2, W - 1, "DENJI StandBy Dashboard")
         face = denji_face(DS.mood)
-        centre(win, 3, face, cp(P_CYAN, bold=True))
-        centre(win, 5, f'User: "{_clip(DS.user_text, max(8, W-10))}"', cp(P_DIM))
-        centre(win, 6, f'Denji: "{_clip(DS.response_text, max(8, W-10))}"', cp(P_GREEN))
-        prompt = DS.input_buf if DS.input_mode else "denji play music"
-        put(win, H - 4, 2, _clip(f"> {prompt}", max(8, W - 6)), cp(P_AMBER, bold=True))
-        put(win, H - 1, 0, " [t] type  [enter] send  [space] play/pause  [<- ->] views  [q] quit ", cp(P_DIM))
+        centre(win, 2, face, cp(P_CYAN, bold=True))
+        centre(win, 3, f"State: {DS.mood.upper()}", cp(P_MID))
+        centre(win, 4, _clip(f'User: "{DS.user_text}"', W - 4), cp(P_DIM))
+        centre(win, 5, _clip(f'Denji: "{DS.response_text}"', W - 4), cp(P_GREEN))
+        track = AUDIO.current.get("name", "No track") if AUDIO.current else "No track"
+        put(win, 7, 1, _clip(f"♫ {track}", W - 2), cp(P_HI))
+        put(win, 8, 1, _clip(f"Mic: {DS.mic_status}  Cam: {DS.camera_status}  Face: {'✓' if DS.face_seen else '✗'}", W - 2), cp(P_DIM))
+        prompt = DS.input_buf if DS.input_mode else "type or [v]oice"
+        put(win, H - 3, 1, _clip(f"> {prompt}", W - 2), cp(P_AMBER, bold=True))
+        put(win, H - 1, 0, " [t]ype  [v]oice  [c]amera  [space]play  [←→]views  [q]uit ", cp(P_DIM))
         return
 
-    header_h = 3
-    core_y = 1 + header_h
-    core_h = H - 12
-    bottom_y = core_y + core_h
-    bottom_h = H - bottom_y - 1
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  MAIN 3-COLUMN LAYOUT (30% | 40% | 30%)
+    # ═══════════════════════════════════════════════════════════════════════════
+    top_y = 1
+    footer_y = H - 1
+    content_h = footer_y - top_y
 
-    box(win, 1, 0, header_h, W - 1, "DENJI DASHBOARD")
-    put(win, 2, 2, now.strftime("%A %d %b %Y  %H:%M:%S"), cp(P_HI))
-    put(win, 2, W - 30, f"CPU {sd.get('cpu', 0.0):4.0f}%  MEM {sd.get('mem_pct', 0.0):4.0f}%", cp(P_DIM))
+    left_w = max(30, W // 4)
+    right_w = max(30, W // 4)
+    mid_w = W - 1 - left_w - right_w
+    left_x, mid_x, right_x = 0, left_w, left_w + mid_w
 
-    left_w = max(24, W // 4)
-    mid_w = max(38, W // 2)
-    right_w = max(24, (W - 1) - left_w - mid_w)
-    left_x = 0
-    mid_x = left_x + left_w
-    right_x = mid_x + mid_w
+    # Calculate panel heights (2 rows for top, 1 row for bottom)
+    row1_h = max(13, (content_h - 1) // 2)
+    row2_h = max(8, content_h - row1_h - 1)
+    
+    first_y = top_y
+    second_y = first_y + row1_h
 
-    box(win, core_y, left_x, core_h, left_w, "QUICK ACTIONS")
-    quick = [
-        "[1] Play Music",
-        "[2] Focus Mode",
-        "[3] Show Calendar",
-        "[4] Start Video",
-        "[5] News Snapshot",
-        "[6] System Snapshot",
-    ]
-    for i, line in enumerate(quick):
-        put(win, core_y + 2 + i, left_x + 2, _clip(line, left_w - 4), cp(P_CYAN if i < 4 else P_MID))
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  ROW 1: CLOCK & EVENTS | DENJI | NEWS & MARKET
+    # ═══════════════════════════════════════════════════════════════════════════
 
-    box(win, core_y, mid_x, core_h, mid_w, "DENJI CORE")
+    # LEFT: ASCII DIGITAL CLOCK
+    clock_h = max(9, row1_h // 2)
+    box(win, first_y, left_x, clock_h, left_w, "CLOCK")
+    ascii_time = clock_data["hour_24"]
+    rows = ascii_clock_lines(ascii_time)
+    clock_inner_w = max(1, left_w - 2)
+    for i, row in enumerate(rows):
+        if i >= max(0, clock_h - 3):
+            break
+        row_txt = row.rstrip()
+        if len(row_txt) > clock_inner_w:
+            row_txt = row_txt[:clock_inner_w]
+        row_x = left_x + max(1, (left_w - len(row_txt)) // 2)
+        put(win, first_y + 1 + i, row_x, row_txt, cp(P_HI, bold=True))
+    date_short = now.strftime("%a %d %b %Y")
+    date_txt = date_short if len(date_short) <= left_w - 2 else date_short[:left_w - 2]
+    date_x = left_x + max(1, (left_w - len(date_txt)) // 2)
+    put(win, first_y + clock_h - 2, date_x, date_txt, cp(P_DIM))
+
+    # LEFT: UPCOMING EVENTS
+    events_h = max(6, row1_h - clock_h - 1)
+    box(win, first_y + clock_h, left_x, events_h, left_w, "EVENTS")
+    evtitle, evtime = next_event()
+    e_msg = f"{evtitle} @ {evtime}"
+    put(win, first_y + clock_h + 1, left_x + 1, _clip(_marquee(e_msg, left_w - 4), left_w - 4), cp(P_HI))
+    put(win, first_y + clock_h + 2, left_x + 1, _clip("Upcoming schedule", left_w - 4), cp(P_DIM))
+
+    # CENTER: DENJI (FULL HEIGHT, ROW 1)
+    box(win, first_y, mid_x, row1_h, mid_w, "DENJI Core")
     face = denji_face(DS.mood)
-    mood_label = DS.mood.upper()
-    centre(win, core_y + 3, face, cp(P_CYAN, bold=True))
-    centre(win, core_y + 5, f"State: {mood_label}", cp(P_MID))
-    centre(win, core_y + 7, f'User: "{_clip(DS.user_text, max(8, mid_w-8))}"', cp(P_DIM))
-    centre(win, core_y + 9, f'Denji: "{_clip(DS.response_text, max(8, mid_w-8))}"', cp(P_GREEN, bold=True))
-
-    wave_y = core_y + max(11, core_h - 6)
-    if wave_y < core_y + core_h - 1:
-        usable = max(10, mid_w - 6)
-        bars = list(ST._spec_smooth[:min(usable // 2, len(ST._spec_smooth))])
-        sx = mid_x + 3
-        for i, v in enumerate(bars):
+    centre(win, first_y + 2, face, cp(P_CYAN, bold=True) | curses.A_BOLD)
+    centre(win, first_y + 3, f"[[ {DS.mood.upper():^{max(10, mid_w - 8)}} ]]", cp(P_GREEN if DS.mood == "happy" else P_AMBER if DS.mood == "sad" else P_MID))
+    centre(win, first_y + 5, f"Eyes: {DS.eye_x:+2d},{DS.eye_y:+2d}  {'Y' if DS.face_seen else 'N'}", cp(P_DIM))
+    centre(win, first_y + 6, "Digital AI Assistant", cp(P_DIM))
+    
+    if DS.mood == "speaking":
+        vy = first_y + row1_h - 3
+        spec = ST._spec_smooth[:max(6, (mid_w - 4) // 2)]
+        vis = ""
+        for v in spec:
             lvl = max(1, min(8, int(v * 8) + 1))
-            put(win, wave_y, sx + i * 2, "▁▂▃▄▅▆▇█"[lvl - 1], cp(P_BLUE))
+            vis += "▁▂▃▄▅▆▇█"[lvl - 1]
+        centre(win, vy, vis, cp(P_BLUE, bold=True))
 
-    box(win, core_y, right_x, core_h, right_w, "LIVE STATUS")
-    bat = sd.get("bat_pct", 0)
-    bat_plug = sd.get("bat_plug", False)
-    mcol = P_GREEN if DS.mic_status == "Listening" else P_DIM
-    ccol = P_GREEN if DS.camera_status == "Active" else P_DIM
-    fcol = P_GREEN if DS.face_seen else P_MID
-    tcol = P_GREEN if DS.tts_status == "Speaking" else P_DIM
-    put(win, core_y + 2, right_x + 2, f"Mic: {DS.mic_status}", cp(mcol))
-    put(win, core_y + 3, right_x + 2, f"Camera: {DS.camera_status}", cp(ccol))
-    put(win, core_y + 4, right_x + 2, f"Face: {'Detected' if DS.face_seen else 'Not detected'}", cp(fcol))
-    put(win, core_y + 5, right_x + 2, f"Mood: {DS.mood}", cp(P_CYAN))
-    put(win, core_y + 6, right_x + 2, f"Voice: {DS.tts_status}", cp(tcol))
-    put(win, core_y + 7, right_x + 2, f"Net: {kbfmt(sd.get('net_dn', 0))}", cp(P_MID))
-    put(win, core_y + 8, right_x + 2, f"Battery: {bat}% {'+' if bat_plug else ''}", cp(P_AMBER))
-    put(win, core_y + 9, right_x + 2, "Workflow", cp(P_HI, bold=True))
-    put(win, core_y + 10, right_x + 2, "1. Listening", cp(P_DIM))
-    put(win, core_y + 11, right_x + 2, "2. Processing", cp(P_DIM))
-    put(win, core_y + 12, right_x + 2, "3. Speaking", cp(P_DIM))
+    # RIGHT: TOP NEWS
+    news_h = max(7, row1_h // 2 - 1)
+    box(win, first_y, right_x, news_h, right_w, "NEWS")
+    items = get_news_items()
+    top_news = items[0].get("title", "No news") if items else "No news"
+    put(win, first_y + 1, right_x + 1, _clip(_marquee(top_news, right_w - 4), right_w - 4), cp(P_HI))
+    put(win, first_y + 2, right_x + 1, _clip("Latest headlines", right_w - 4), cp(P_DIM))
 
-    if bottom_h >= 5:
-        col_w = (W - 1) // 3
-        bx1, bx2, bx3 = 0, col_w, col_w * 2
-        bw1 = col_w
-        bw2 = col_w
-        bw3 = (W - 1) - bx3
+    # RIGHT: MARKET CONDITION
+    market_h = max(6, row1_h - news_h - 1)
+    box(win, first_y + news_h, right_x, market_h, right_w, "MARKET")
+    put(win, first_y + news_h + 1, right_x + 1, _clip("Stock & crypto data", right_w - 4), cp(P_DIM))
+    put(win, first_y + news_h + 2, right_x + 1, _clip("Market status", right_w - 4), cp(P_DIM))
 
-        box(win, bottom_y, bx1, bottom_h, bw1, "COMMAND INPUT")
-        prompt = DS.input_buf if DS.input_mode else "denji play music"
-        blink = "_" if (DS.input_mode and int(time.time() * 2) % 2 == 0) else ""
-        put(win, bottom_y + 1, bx1 + 2, _clip(f"> {prompt}{blink}", max(8, bw1 - 4)), cp(P_AMBER, bold=True))
-        put(win, bottom_y + 2, bx1 + 2, "[Enter] send  [T] type  [V] listen  [C] camera", cp(P_DIM))
-        put(win, bottom_y + 3, bx1 + 2, "Try: Denji play music", cp(P_DIM))
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  ROW 2: MUSIC | CHAT | LIVE STATUS
+    # ═══════════════════════════════════════════════════════════════════════════
 
-        box(win, bottom_y, bx2, bottom_h, bw2, "ACTIVE TASK")
-        put(win, bottom_y + 1, bx2 + 2, _clip(f"Running: {DS.last_action}", max(8, bw2 - 4)), cp(P_HI))
-        put(win, bottom_y + 2, bx2 + 2, f"Music: {'Playing' if AUDIO.playing else 'Paused'}", cp(P_GREEN if AUDIO.playing else P_AMBER))
-        put(win, bottom_y + 3, bx2 + 2, _clip(f'Last: "{DS.response_text}"', max(8, bw2 - 4)), cp(P_DIM))
+    # LEFT: MUSIC PLAYER
+    box(win, second_y, left_x, row2_h, left_w, "MUSIC")
+    track = AUDIO.current.get("name", "No track") if AUDIO.current else "No track"
+    put(win, second_y + 1, left_x + 1, _clip(f"Track: {track}", left_w - 4), cp(P_HI))
+    put(win, second_y + 2, left_x + 1,
+        _clip(f"State: {'PLAY' if AUDIO.playing else 'PAUSE'}", left_w - 4),
+        cp(P_GREEN if AUDIO.playing else P_AMBER))
 
-        box(win, bottom_y, bx3, bottom_h, bw3, "EVENT FEED")
-        evtitle, evtime = next_event()
-        items = get_news_items()
-        top_news = items[0].get("title", "No news available") if items else "No news available"
-        put(win, bottom_y + 1, bx3 + 2, _clip(f"Event: {evtitle}", max(8, bw3 - 4)), cp(P_MID))
-        put(win, bottom_y + 2, bx3 + 2, _clip(f"Time: {evtime}", max(8, bw3 - 4)), cp(P_DIM))
-        put(win, bottom_y + 3, bx3 + 2, _clip(f"News: {top_news}", max(8, bw3 - 4)), cp(P_MID))
+    # CENTER: CHAT
+    box(win, second_y, mid_x, row2_h, mid_w, "TALK WITH DENJI")
+    centre(win, second_y + 1, _clip(f'User: "{DS.user_text}"', max(8, mid_w - 6)), cp(P_DIM))
+    centre(win, second_y + 2, _clip(f'Denji: "{DS.response_text}"', max(8, mid_w - 6)), cp(P_GREEN))
+    prompt = DS.input_buf if DS.input_mode else "[t] type or [v] voice"
+    put(win, second_y + 3, mid_x + 1, _clip(f"> {prompt}", mid_w - 4), cp(P_AMBER, bold=True))
 
-    put(win, H-1, 0,
-        " [t] type command  [enter] send  [v] voice  [c] camera  [1-6] quick actions  [space] music  [<- ->] views  [q] quit ",
+    # RIGHT: LIVE STATUS
+    box(win, second_y, right_x, row2_h, right_w, "STATUS")
+    put(win, second_y + 1, right_x + 1, _clip(f"Mic: {DS.mic_status}", right_w - 4), cp(P_MID))
+    put(win, second_y + 2, right_x + 1, _clip(f"Cam: {DS.camera_status}", right_w - 4), cp(P_MID))
+    put(win, second_y + 3, right_x + 1, _clip(f"Voice: {DS.tts_status}", right_w - 4), cp(P_MID))
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  FOOTER
+    # ═══════════════════════════════════════════════════════════════════════════
+    put(win, H - 1, 0,
+        " [t]ype [v]oice [c]amera [space]play [z/x]track [1-6]quick [←→]views [q]uit ",
         cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7587,7 +7708,111 @@ def main(stdscr):
             in_text = _in_text_input_mode()
 
 
+def detect_windows_displays():
+    """Return monitor info on Windows. On non-Windows returns single-display default."""
+    info = {
+        "count": 1,
+        "primary": None,
+        "secondary": None,
+        "all": [],
+    }
+    if platform.system() != "Windows":
+        return info
+
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_ulong),
+                ("rcMonitor", RECT),
+                ("rcWork", RECT),
+                ("dwFlags", ctypes.c_ulong),
+            ]
+
+        monitors = []
+        monitor_enum_proc = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(RECT),
+            ctypes.c_longlong,
+        )
+
+        def _enum_monitor(hmon, _hdc, _lprc, _lparam):
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                r = mi.rcMonitor
+                monitors.append({
+                    "left": int(r.left),
+                    "top": int(r.top),
+                    "right": int(r.right),
+                    "bottom": int(r.bottom),
+                    "width": int(r.right - r.left),
+                    "height": int(r.bottom - r.top),
+                    "primary": bool(mi.dwFlags & 1),
+                })
+            return 1
+
+        user32.EnumDisplayMonitors(0, 0, monitor_enum_proc(_enum_monitor), 0)
+
+        if monitors:
+            info["all"] = monitors
+            info["count"] = len(monitors)
+            info["primary"] = next((m for m in monitors if m["primary"]), monitors[0])
+            info["secondary"] = next((m for m in monitors if not m["primary"]), None)
+    except Exception:
+        pass
+
+    return info
+
+
+def move_console_to_secondary_display():
+    """Move console window to a secondary monitor when available."""
+    displays = detect_windows_displays()
+    if platform.system() != "Windows":
+        return displays
+
+    if displays.get("count", 1) < 2 or not displays.get("secondary"):
+        return displays
+
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if not hwnd:
+            return displays
+
+        user32 = ctypes.windll.user32
+        sec = displays["secondary"]
+
+        target_w = max(1000, min(int(sec["width"] * 0.85), sec["width"]))
+        target_h = max(700, min(int(sec["height"] * 0.85), sec["height"]))
+
+        x = int(sec["left"] + max(0, (sec["width"] - target_w) // 2))
+        y = int(sec["top"] + max(0, (sec["height"] - target_h) // 2))
+
+        user32.MoveWindow(hwnd, x, y, target_w, target_h, True)
+    except Exception:
+        pass
+
+    return displays
+
+
 def run_denji():
+    displays = move_console_to_secondary_display()
+
     backend = AUDIO._backend or ""
     if not backend:
         print("""
@@ -7610,8 +7835,10 @@ def run_denji():
         time.sleep(1)
     else:
         bname = os.path.basename(backend) if os.path.isfile(backend) else backend
+        dsp_count = displays.get("count", 1)
+        dsp_msg = "primary" if dsp_count < 2 else "secondary"
         print(f"""
-  Denji StandBy  |  audio: {bname}  |  {platform.system()}
+  Denji StandBy  |  audio: {bname}  |  {platform.system()}  |  displays: {dsp_count} ({dsp_msg})
   SPACE=play/pause  z/x=prev/next  <-/->=views  q=quit
 """)
     time.sleep(0.3)
