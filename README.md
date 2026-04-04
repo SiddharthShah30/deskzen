@@ -63,36 +63,45 @@
 
 ## 🚀 Installation & Setup
 
-1. **Clone and Run**:
+1. **Clone and Install**:
 ```bash
 git clone https://github.com/your-username/terminal-standby.git
 cd terminal-standby
-python main.py
-
-```
-
-
-2. **Dependencies**: The app will attempt to auto-install `windows-curses` and `sounddevice` on first run. For the full experience, install `psutil` and `yt-dlp` via pip.
-3. **Localization**: On first launch of View 9, you will be prompted to select your country. This sets up defaults for news sources and market data.
-
-### Global Denji Command (Any Terminal)
-
-Install this workspace once in your environment to get global launch commands:
-
-```bash
 pip install -e .
 ```
 
-Then launch from any terminal session using either:
-
+2. **Run the app**:
 ```bash
 denji
 ```
 
-or
-
+If you prefer the fallback name, use:
 ```bash
 standby
+```
+
+You can also launch it as a module:
+```bash
+python -m denji_standby
+```
+
+3. **Dependencies**: The app will attempt to auto-install `windows-curses` and `sounddevice` on first run. For the full experience, install `psutil` and `yt-dlp` via pip.
+4. **Localization**: On first launch of View 9, you will be prompted to select your country. This sets up defaults for news sources and market data.
+
+### Global Denji Command
+
+The `denji` command is installed through the package entry point defined in `pyproject.toml`. After running `pip install -e .`, it will be available in that Python environment's terminal sessions.
+
+If the command is not found, use the exact interpreter for the environment:
+
+```bash
+python -m pip install -e .
+```
+
+Then relaunch:
+
+```bash
+denji
 ```
 
 ---

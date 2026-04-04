@@ -11,8 +11,9 @@ requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]
-denji = "main:run_denji"
-standby = "main:run_denji"
+denji = "denji_standby.launcher:run_denji"
+standby = "denji_standby.launcher:run_denji"
 
 [tool.setuptools]
 py-modules = ["main"]
+packages = ["denji_standby"]

@@ -61,16 +61,36 @@ P_BLUE  = 7;  P_CYAN = 8;  P_PINK = 9;  P_BOX = 10
 
 def init_colors():
     curses.start_color(); curses.use_default_colors()
-    curses.init_pair(P_DIM,   238, -1); curses.init_pair(P_MID,   246, -1)
-    curses.init_pair(P_HI,    255, -1); curses.init_pair(P_GREEN,  82, -1)
+    curses.init_pair(P_DIM,   242, -1); curses.init_pair(P_MID,   249, -1)
+    curses.init_pair(P_HI,    255, -1); curses.init_pair(P_GREEN,  70, -1)
     curses.init_pair(P_AMBER, 214, -1); curses.init_pair(P_RED,   203, -1)
-    curses.init_pair(P_BLUE,   75, -1); curses.init_pair(P_CYAN,   87, -1)
-    curses.init_pair(P_PINK,  213, -1); curses.init_pair(P_BOX,   240, -1)
+    curses.init_pair(P_BLUE,   75, -1); curses.init_pair(P_CYAN,   81, -1)
+    curses.init_pair(P_PINK,  170, -1); curses.init_pair(P_BOX,   237, -1)
 
 def cp(p, bold=False):
     a = curses.color_pair(p)
     if bold: a |= curses.A_BOLD
     return a
+
+def trim_text(text, width):
+    return text if len(text) <= width else text[:max(0, width - 1)] + "…"
+
+def clear_line(win, y, x=0, width=None, attr=0):
+    H, W = win.getmaxyx()
+    if y < 0 or y >= H:
+        return
+    if width is None:
+        width = W - x
+    if width <= 0:
+        return
+    put(win, y, x, " " * max(0, width), attr)
+
+def chip(win, y, x, text, fg=P_HI, fill_attr=0, bold=True):
+    label = f" {text} "
+    put(win, y, x, label, cp(fg, bold=bold) | fill_attr)
+
+def divider(win, y, width, x=0, attr=0):
+    put(win, y, x, "─" * max(0, width), attr or cp(P_BOX))
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  DRAW HELPERS
@@ -3416,7 +3436,7 @@ def v_dashboard(win, W, H):
 
     # Fallback for very small terminals - still show all panels, just stacked
     if W < 100 or H < 26:
-        box(win, 1, 0, H - 2, W - 1, "DENJI StandBy Dashboard")
+        box(win, 1, 0, H - 2, W - 1, "COMMAND CENTER")
         face = denji_face(DS.mood)
         centre(win, 2, face, cp(P_CYAN, bold=True))
         centre(win, 3, f"State: {DS.mood.upper()}", cp(P_MID))
@@ -3474,19 +3494,19 @@ def v_dashboard(win, W, H):
 
     # LEFT: UPCOMING EVENTS
     events_h = max(6, row1_h - clock_h - 1)
-    box(win, first_y + clock_h, left_x, events_h, left_w, "EVENTS")
+    box(win, first_y + clock_h, left_x, events_h, left_w, "SCHEDULE")
     evtitle, evtime = next_event()
     e_msg = f"{evtitle} @ {evtime}"
     put(win, first_y + clock_h + 1, left_x + 1, _clip(_marquee(e_msg, left_w - 4), left_w - 4), cp(P_HI))
     put(win, first_y + clock_h + 2, left_x + 1, _clip("Upcoming schedule", left_w - 4), cp(P_DIM))
 
     # CENTER: DENJI (FULL HEIGHT, ROW 1)
-    box(win, first_y, mid_x, row1_h, mid_w, "DENJI Core")
+    box(win, first_y, mid_x, row1_h, mid_w, "COMMAND CENTER")
     face = denji_face(DS.mood)
     centre(win, first_y + 2, face, cp(P_CYAN, bold=True) | curses.A_BOLD)
-    centre(win, first_y + 3, f"[[ {DS.mood.upper():^{max(10, mid_w - 8)}} ]]", cp(P_GREEN if DS.mood == "happy" else P_AMBER if DS.mood == "sad" else P_MID))
-    centre(win, first_y + 5, f"Eyes: {DS.eye_x:+2d},{DS.eye_y:+2d}  {'Y' if DS.face_seen else 'N'}", cp(P_DIM))
-    centre(win, first_y + 6, "Digital AI Assistant", cp(P_DIM))
+    centre(win, first_y + 3, f"{DS.mood.upper():^{max(10, mid_w - 8)}}", cp(P_GREEN if DS.mood == "happy" else P_AMBER if DS.mood == "sad" else P_MID, bold=True))
+    centre(win, first_y + 5, f"Attention: {DS.eye_x:+2d},{DS.eye_y:+2d}  Face {'seen' if DS.face_seen else 'idle'}", cp(P_DIM))
+    centre(win, first_y + 6, "Assistant status", cp(P_DIM))
     
     if DS.mood == "speaking":
         vy = first_y + row1_h - 3
@@ -3524,14 +3544,14 @@ def v_dashboard(win, W, H):
         cp(P_GREEN if AUDIO.playing else P_AMBER))
 
     # CENTER: CHAT
-    box(win, second_y, mid_x, row2_h, mid_w, "TALK WITH DENJI")
+    box(win, second_y, mid_x, row2_h, mid_w, "INPUT")
     centre(win, second_y + 1, _clip(f'User: "{DS.user_text}"', max(8, mid_w - 6)), cp(P_DIM))
     centre(win, second_y + 2, _clip(f'Denji: "{DS.response_text}"', max(8, mid_w - 6)), cp(P_GREEN))
     prompt = DS.input_buf if DS.input_mode else "[t] type or [v] voice"
     put(win, second_y + 3, mid_x + 1, _clip(f"> {prompt}", mid_w - 4), cp(P_AMBER, bold=True))
 
     # RIGHT: LIVE STATUS
-    box(win, second_y, right_x, row2_h, right_w, "STATUS")
+    box(win, second_y, right_x, row2_h, right_w, "LIVE STATUS")
     put(win, second_y + 1, right_x + 1, _clip(f"Mic: {DS.mic_status}", right_w - 4), cp(P_MID))
     put(win, second_y + 2, right_x + 1, _clip(f"Cam: {DS.camera_status}", right_w - 4), cp(P_MID))
     put(win, second_y + 3, right_x + 1, _clip(f"Voice: {DS.tts_status}", right_w - 4), cp(P_MID))
@@ -3540,7 +3560,7 @@ def v_dashboard(win, W, H):
     #  FOOTER
     # ═══════════════════════════════════════════════════════════════════════════
     put(win, H - 1, 0,
-        " [t]ype [v]oice [c]amera [space]play [z/x]track [1-6]quick [←→]views [q]uit ",
+        " t type  v voice  c camera  space play  z/x track  1-6 quick  ←/→ views  q quit ",
         cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3711,7 +3731,7 @@ def v_focus(win, W, H):
     fm   = ST.focus_modes[ST.focus_idx]
     pc   = P_RED if ST.pomo_phase=="WORK" else P_GREEN
 
-    centre(win, 1, f"── {fm} ──", cp(P_HI,bold=True)|curses.A_BOLD)
+    centre(win, 1, f"FOCUS MODE  ·  {fm}", cp(P_HI,bold=True)|curses.A_BOLD)
 
     pm=int(ST.pomo_secs)//60; ps=int(ST.pomo_secs)%60
     pct=1.0-ST.pomo_secs/max(1,ST.pomo_total)
@@ -3748,7 +3768,7 @@ def v_focus(win, W, H):
         box(win,vy,2,vis_h+2,W-4,"MUSIC")
         draw_spectrum(win,vy+1,3,vis_h,W-6,ST._spec_smooth)
 
-    put(win,H-1,0," [p] start/pause  [r] reset  [s] skip  [f] mode  [←→] views  [q] quit ",cp(P_DIM))
+    put(win,H-1,0," p start/pause  r reset  s skip  f mode  ←/→ views  q quit ",cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  OS DETECTION & ASCII LOGOS
@@ -3927,7 +3947,7 @@ def v_neofetch(win, W, H):
             put(win, ry, bar_x + 6 + bw, f"{pct:3d}%", cp(col))
 
     put(win, H-1, 0,
-        " neofetch · Pac-Man · [<- ->] views  [q] quit ",
+        " system overview  ·  ←/→ views  ·  q quit ",
         cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4008,7 +4028,7 @@ def v_network(win, W, H):
         box(win,vy,0,vis_h+2,W-1,"SPECTRUM")
         draw_spectrum(win,vy+1,1,vis_h,W-3,ST._spec_smooth)
 
-    put(win,H-1,0," real-time data  [←→] views  [q] quit ",cp(P_DIM))
+    put(win,H-1,0," real-time data  ·  ←/→ views  ·  q quit ",cp(P_DIM))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4046,81 +4066,81 @@ def _lib_filtered_indices():
 #  CHROME
 # ══════════════════════════════════════════════════════════════════════════════
 def draw_topbar(win, W):
-    now=datetime.datetime.now(); sd=SD.snap()
-    ts=now.strftime("%H:%M:%S"); ds=now.strftime("%a %b %d").upper()
-    bat=sd.get("bat_pct",100); plug=sd.get("bat_plug",True)
-    bc=P_GREEN if bat>40 else (P_AMBER if bat>15 else P_RED)
-    put(win,0,0," "*W, cp(P_DIM)|curses.A_REVERSE)
+    now = datetime.datetime.now(); sd = SD.snap()
+    ts = now.strftime("%H:%M:%S")
+    ds = now.strftime("%a %d %b")
+    bat = sd.get("bat_pct", 100); plug = sd.get("bat_plug", True)
+    bc = P_GREEN if bat > 40 else (P_AMBER if bat > 15 else P_RED)
 
-    # Dashboard-only override: show running pomodoro status on the left.
+    clear_line(win, 0, 0, W, cp(P_BOX))
+    divider(win, 0, W, 0, cp(P_BOX))
+
+    brand = " DENJI STANDBY "
+    put(win, 0, 1, brand, cp(P_CYAN, bold=True))
+
     if ST.view == 0 and ST.pomo_run:
         pm = int(ST.pomo_secs) // 60
         ps = int(ST.pomo_secs) % 60
-        left = f" POMO {ST.pomo_phase} {pm:02d}:{ps:02d} "
+        center_text = f"FOCUS {ST.pomo_phase} {pm:02d}:{ps:02d}"
     else:
-        left = f" {ts}  {ds}"
-    put(win,0,1,left[:max(0, W-2)], cp(P_HI)|curses.A_REVERSE)
+        center_text = ALL_VIEW_NAMES[ST.view] if 0 <= ST.view < len(ALL_VIEW_NAMES) else "UNKNOWN VIEW"
+    put(win, 0, max(1, (W - len(center_text)) // 2), center_text, cp(P_HI, bold=True))
 
-    if 0 <= ST.view < len(ALL_VIEW_NAMES):
-        view_name = ALL_VIEW_NAMES[ST.view]
-    else:
-        view_name = "UNKNOWN VIEW"
-    vn=f"  {view_name}  "
-    put(win,0,(W-len(vn))//2,vn, cp(P_HI)|curses.A_REVERSE|curses.A_BOLD)
-    if AUDIO.playing:
-        td=AUDIO.current
-        note_s=f" ~ {td['name'][:20]} "
-        put(win,0,W//2+len(vn)//2+2,note_s, cp(P_CYAN)|curses.A_REVERSE)
-    right=f" {'+'if plug else ' '}{bat}%  {sd.get('cpu',0):.0f}%cpu  {sd.get('mem_pct',0):.0f}%mem "
-    put(win,0,W-len(right)-1,right, cp(bc)|curses.A_REVERSE)
+    status_text = f"{ts}  {ds}"
+    if AUDIO.playing and AUDIO.current:
+        status_text = f"{status_text}  •  {AUDIO.current.get('name', '')[:18]}"
+    right_text = f"{'+' if plug else ' '} {bat:>3}%  CPU {sd.get('cpu', 0):>4.0f}%  MEM {sd.get('mem_pct', 0):>4.0f}%"
+    right_x = max(20, W - len(right_text) - 2)
+    put(win, 0, right_x - len(status_text) - 2, trim_text(status_text, max(0, right_x - 3)), cp(P_DIM))
+    put(win, 0, W - len(right_text) - 1, right_text, cp(bc, bold=True))
 
 def draw_navbar(win, W, H):
     active_view = ST.view if ST.view in NAV_CYCLE_VIEWS else HUB_VIEW_IDX
-    dots="  ".join("◆" if i==active_view else "◇" for i in NAV_CYCLE_VIEWS)
-    put(win,H-2,1,"[← h]",cp(P_DIM))
-    centre(win,H-2,dots,cp(P_DIM))
-    put(win,H-2,W-7,"[l →]",cp(P_DIM))
+    labels = ["Home", "Music", "Focus", "System", "Net", "Cal", "Video", "Hub"]
+    segments = []
+    for idx, view_idx in enumerate(NAV_CYCLE_VIEWS):
+        label = labels[idx]
+        segments.append(f"{label}" if view_idx != active_view else f"[{label}]")
+    nav = "  ".join(segments)
+    put(win, H - 2, 2, "←/→ navigate", cp(P_DIM))
+    centre(win, H - 2, nav[:max(0, W - 24)], cp(P_DIM))
+    put(win, H - 2, max(2, W - 15), "q quit", cp(P_DIM))
 
 
 def draw_footer(win, W, H):
     """Unified bottom menu bar for all views."""
     hints = {
-        0: "[a] add todo  [d] done/remove  [space] music  [q] quit",
-        1: "[space] play/pause  [z/x] prev/next  [r] repeat  [s] shuffle",
-        2: "[p] start/pause  [r] reset  [s] skip  [f] mode",
-        3: "Neofetch live view  [space] music  [q] quit",
-        4: "Network monitor live  [space] music  [q] quit",
-        5: "[1/2/3/4] views  [a] add  [d] delete  [g] sync ICS",
-        6: "[o] file  [y] YouTube  [s] stop  [t] mode  [a] ASCII",
-        7: "Hub shortcuts: [8] News/Stocks  [9] ETF/Crypto  [0] Dashboard",
-        8: "[1/2] tab  [c] country  [a/d] watchlist  [r] refresh",
-        9: "[1/2/3/4] tab  [a] add symbol  [d] remove  [r] refresh",
+        0: "t type  v voice  c camera  space play  z/x track  1-6 quick",
+        1: "1-4 filter  j/k browse  enter play  y URL  f file  d remove",
+        2: "p start/pause  r reset  s skip  f mode",
+        3: "system overview only  ←/→ views  q quit",
+        4: "network, battery, devices, and spectrum  ←/→ views  q quit",
+        5: "day/week/month/year  1-4 modes  a add  G connect  D disconnect  r refresh",
+        6: "o file  y YouTube  s stop  t terminal/window  a ASCII  k force stop",
+        7: "1 news  2 stocks  3 markets  r refresh",
+        8: "1 news  2 stocks  j/k scroll  enter open  C country  r refresh",
+        9: "1-4 sections  j/k scroll  a add  d remove  r refresh",
     }
 
-    put(win, H-3, 0, "─"*W, cp(P_BOX))
-    put(win, H-1, 0, " "*W, cp(P_DIM)|curses.A_REVERSE)
+    divider(win, H - 3, W, 0, cp(P_BOX))
+    clear_line(win, H - 1, 0, W, cp(P_BOX))
+    put(win, H - 1, 1, "q quit", cp(P_HI, bold=True))
+    put(win, H - 1, max(1, W - 18), "←/→ switch view", cp(P_DIM))
 
-    left = " [q] quit "
-    right = " [\u2190/\u2192] switch view "
-    msg = hints.get(ST.view, "Use arrows to navigate views")
-
-    put(win, H-1, 1, left[:max(0, W-2)], cp(P_HI)|curses.A_REVERSE)
-    put(win, H-1, max(1, W - len(right) - 1), right, cp(P_HI)|curses.A_REVERSE)
-
-    available = W - len(left) - len(right) - 6
-    if available > 8:
-        trimmed = msg if len(msg) <= available else msg[:available-1] + "…"
-        put(win, H-1, (W - len(trimmed)) // 2, trimmed, cp(P_DIM)|curses.A_REVERSE)
+    msg = hints.get(ST.view, "Use arrow keys to navigate views.")
+    room = W - 24
+    if room > 16:
+        put(win, H - 1, max(12, (W - len(msg)) // 2), trim_text(msg, room), cp(P_DIM))
 
 
 def _responsive_layout(W):
     """Return (main_x, main_w, rail_x, rail_w) for balanced fullscreen layout."""
-    max_main_w = 132
+    max_main_w = 136
 
     if W < 132:
         return 0, W, None, 0
 
-    rail_w = min(42, max(32, W // 4))
+    rail_w = min(40, max(34, W // 4))
     avail_main = W - rail_w - 1
     main_w = min(avail_main, max_main_w)
 
@@ -4138,16 +4158,16 @@ def _responsive_layout(W):
 
 def _view_hint_lines():
     hints = {
-        0: ["Dashboard: tasks + system + visualizer", "Use A / D to add or remove todos", "Press Space to control music"],
-        1: ["Library view: browse all tracks", "Y for YouTube, O for local file", "R repeat, S shuffle, Z/X prev-next"],
-        2: ["Focus: pomodoro workflow", "P start/pause, R reset, S skip", "F cycles focus modes"],
-        3: ["Neofetch: hardware + OS panel", "Animated Pac-Man logo and bars", "Auto-refreshes each frame"],
-        4: ["Network: bandwidth + devices", "Tracks BT / USB and battery", "Good for live diagnostics"],
-        5: ["Calendar: day/week/month/year", "A add event, D delete event", "G sync ICS source"],
-        6: ["Video: local + YouTube playback", "T toggles terminal/window mode", "A toggles ASCII renderer"],
-        7: ["Hub: quick jump to news tools", "Use 8/9/0 shortcuts to switch", "Country drives feeds and symbols"],
-        8: ["News & Stocks: split tabs", "C change country, R refresh", "A/D manage watchlist"],
-        9: ["ETF/Crypto scanner", "J/K navigate, A add symbol", "R refresh market data"],
+        0: ["Dashboard: quick command surface", "t type, v voice, c camera", "space toggles music"],
+        1: ["Library: 1-4 filter views", "j/k move selection, enter plays", "y add URL, f add file, d remove"],
+        2: ["Focus: pomodoro workflow", "p start/pause, r reset, s skip", "f cycles focus modes"],
+        3: ["System overview: hardware + OS", "Animated logo and live resource bars", "No extra actions on this page"],
+        4: ["Network: bandwidth + devices", "Tracks Bluetooth, USB, and battery", "No dedicated actions on this page"],
+        5: ["Calendar: day/week/month/year", "1-4 change view, a add event", "G connect ICS, D disconnect, r refresh"],
+        6: ["Video: local + YouTube playback", "o open file, y open URL, s stop", "t changes terminal/window mode, a ASCII"],
+        7: ["Hub: jump to news tools", "1 news, 2 stocks, 3 markets", "r refreshes everything"],
+        8: ["News & Stocks: split tabs", "1/2 tabs, C change country", "j/k scroll, enter open, r refresh"],
+        9: ["ETF / Crypto / Forex / Commodities", "1-4 sections, j/k scroll", "a add symbol, d remove, r refresh"],
     }
     return hints.get(ST.view, ["Use left/right arrows to navigate views", "Press Q to quit", "Live data updates continuously"])
 
@@ -4163,8 +4183,8 @@ def draw_side_rail(win, x, w, H):
     bat_col = P_GREEN if bat > 40 else (P_AMBER if bat > 15 else P_RED)
 
     try:
-        for y in range(1, H-1):
-            put(win, y, x-1, "│", cp(P_BOX))
+        for y in range(1, H - 1):
+            put(win, y, x - 1, "│", cp(P_BOX))
     except Exception:
         pass
 
@@ -4172,12 +4192,13 @@ def draw_side_rail(win, x, w, H):
     h1 = min(10, max(7, H // 5))
     if y + h1 < H - 2:
         box(win, y, x, h1, w, "SYSTEM")
-        put(win, y+1, x+2, now.strftime("%A"), cp(P_HI, bold=True))
-        put(win, y+2, x+2, now.strftime("%d %b %Y  %H:%M"), cp(P_DIM))
-        put(win, y+4, x+2, f"CPU  {sd.get('cpu', 0):5.1f}%", cp(P_DIM))
-        put(win, y+5, x+2, f"MEM  {sd.get('mem_pct', 0):5.1f}%", cp(P_DIM))
-        put(win, y+6, x+2, f"DSK  {sd.get('disk_pct', 0):5.1f}%", cp(P_DIM))
-        put(win, y+7, x+2, f"BAT  {bat:5.1f}%", cp(bat_col, bold=True))
+        put(win, y + 1, x + 2, now.strftime("%A"), cp(P_HI, bold=True))
+        put(win, y + 2, x + 2, now.strftime("%d %b %Y  %H:%M"), cp(P_DIM))
+        divider(win, y + 3, w - 4, x + 2, cp(P_BOX))
+        put(win, y + 4, x + 2, f"CPU  {sd.get('cpu', 0):5.1f}%", cp(P_DIM))
+        put(win, y + 5, x + 2, f"MEM  {sd.get('mem_pct', 0):5.1f}%", cp(P_DIM))
+        put(win, y + 6, x + 2, f"DSK  {sd.get('disk_pct', 0):5.1f}%", cp(P_DIM))
+        put(win, y + 7, x + 2, f"BAT  {bat:5.1f}%", cp(bat_col, bold=True))
     y += h1
 
     h2 = min(10, max(7, H // 5))
@@ -4185,29 +4206,29 @@ def draw_side_rail(win, x, w, H):
         box(win, y, x, h2, w, "NOW PLAYING")
         if AUDIO.playing:
             td = AUDIO.current
-            put(win, y+1, x+2, "ACTIVE", cp(P_GREEN, bold=True))
-            put(win, y+2, x+2, (td.get("name", "Track")[:w-4]), cp(P_HI))
-            put(win, y+3, x+2, (td.get("artist", "")[:w-4]), cp(P_DIM))
+            put(win, y + 1, x + 2, "ACTIVE", cp(P_GREEN, bold=True))
+            put(win, y + 2, x + 2, trim_text(td.get("name", "Track"), w - 4), cp(P_HI))
+            put(win, y + 3, x + 2, trim_text(td.get("artist", ""), w - 4), cp(P_DIM))
             dur = int(td.get("duration", 0) or 0)
             el = int(AUDIO.elapsed)
-            put(win, y+5, x+2, f"{el//60:02d}:{el%60:02d} / {dur//60:02d}:{dur%60:02d}", cp(P_DIM))
-            bw = max(8, w-4)
+            put(win, y + 5, x + 2, f"{el // 60:02d}:{el % 60:02d} / {dur // 60:02d}:{dur % 60:02d}", cp(P_DIM))
+            bw = max(8, w - 4)
             pct = int((el / max(1, dur)) * 100) if dur > 0 else 0
-            hbar(win, y+6, x+2, bw-2, pct, P_CYAN)
+            hbar(win, y + 6, x + 2, bw - 2, pct, P_CYAN)
         else:
-            put(win, y+2, x+2, "No music playing", cp(P_DIM))
-            put(win, y+4, x+2, "Space: play / pause", cp(P_DIM))
-            put(win, y+5, x+2, "Z/X: prev / next", cp(P_DIM))
+            put(win, y + 2, x + 2, "No music playing", cp(P_DIM))
+            put(win, y + 4, x + 2, "Space toggles playback", cp(P_DIM))
+            put(win, y + 5, x + 2, "Z/X move tracks", cp(P_DIM))
     y += h2
 
     h3 = max(6, H - y - 2)
     if h3 >= 6:
         box(win, y, x, h3, w, "VIEW HELP")
         vn = ALL_VIEW_NAMES[ST.view] if 0 <= ST.view < len(ALL_VIEW_NAMES) else "UNKNOWN"
-        put(win, y+1, x+2, vn[:w-4], cp(P_CYAN, bold=True))
+        put(win, y + 1, x + 2, trim_text(vn, w - 4), cp(P_CYAN, bold=True))
         lines = _view_hint_lines()
-        for i, line in enumerate(lines[:max(1, h3-4)]):
-            put(win, y+3+i, x+2, line[:w-4], cp(P_DIM))
+        for i, line in enumerate(lines[:max(1, h3 - 4)]):
+            put(win, y + 3 + i, x + 2, trim_text(line, w - 4), cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  TEXT INPUT HELPER
@@ -6496,7 +6517,7 @@ def v_news_market_hub(win, W, H):
     if W < 92 or H < 28:
         centre(win, H // 2 - 1, "News & Market Hub looks best at 92x28+", cp(P_AMBER, bold=True))
         centre(win, H // 2, "Resize terminal for premium card layout", cp(P_DIM))
-        put(win, H - 1, 2, "[1] news  [2] stocks  [3] etf  [r] refresh  [←→] views", cp(P_DIM))
+        put(win, H - 1, 2, "1 news  2 stocks  3 markets  r refresh  ←/→ views", cp(P_DIM))
         return
 
     put(win, 1, 0, "─" * W, cp(P_BOX))
@@ -6525,7 +6546,7 @@ def v_news_market_hub(win, W, H):
 
     put(win, H - 2, 0, "─" * W, cp(P_BOX))
     put(win, H - 1, 2,
-        "[1] all news   [2] stocks board   [3] etf/crypto deck   [r] refresh everything   [ESC] back from child page   [q] quit",
+        "1 news  2 stocks  3 markets  r refresh  esc back  q quit",
         cp(P_DIM))
 
 
@@ -6669,7 +6690,7 @@ def v_news_stocks(win, W, H):
 
     country_lbl = f"  {flag} {cname} "
     put(win, 1, tx + 2, country_lbl, cp(P_AMBER))
-    put(win, 1, tx + 2 + len(country_lbl) + 1, "[C]=change country", cp(P_DIM))
+    put(win, 1, tx + 2 + len(country_lbl) + 1, "C change country", cp(P_DIM))
     put(win, 2, 0, "─" * W, cp(P_BOX))
 
     if NSS.country_mode:
@@ -6847,11 +6868,11 @@ def _draw_news_tab(win, W, H, items):
             put(win, H-1, 0, hint[:W], cp(P_CYAN, bold=True))
         else:
             put(win, H-1, 0,
-                " [j/k] move  [ENTER] open link  [ESC] deselect  [r] refresh  [C] country  [q] quit ",
+                " j/k move  enter open  esc deselect  r refresh  C country  q quit ",
                 cp(P_DIM))
     else:
         put(win, H-1, 0,
-            " [j/k] select item  [ENTER] open in browser  [r] refresh  [C] country  [q] quit ",
+            " j/k select  enter open  r refresh  C country  q quit ",
             cp(P_DIM))
 
 
@@ -6869,7 +6890,7 @@ def _draw_stocks_tab(win, W, H, stocks, watchlist):
                              fetch_currency_bg(vc, hc), daemon=True).start()
 
     # ── Sub-tab bar: MARKET | PORTFOLIO ───────────────────────────────────────
-    sub_tabs = [(" 📈 MARKET ", 0), (" 💼 PORTFOLIO ", 1)]
+    sub_tabs = [("  MARKET  ", 0), ("  PORTFOLIO  ", 1)]
     NSS.stock_sub_regions = []
     tx = 2
     put(win, 3, 0, " " * W, cp(P_DIM))
@@ -6884,9 +6905,9 @@ def _draw_stocks_tab(win, W, H, stocks, watchlist):
     if home_cur and view_cur and home_cur != view_cur:
         rate = get_currency_rate(view_cur, home_cur)
         if rate:
-            cur_s = f"💱 1 {view_cur} = {rate:.4f} {home_cur}  "
+            cur_s = f"1 {view_cur} = {rate:.4f} {home_cur}  "
         else:
-            cur_s = f"💱 {view_cur}/{home_cur} loading…  "
+            cur_s = f"{view_cur}/{home_cur} loading…  "
         put(win, 3, W - len(cur_s) - 2, cur_s, cp(P_CYAN))
 
     put(win, 4, 0, "─" * W, cp(P_BOX))
@@ -6975,9 +6996,9 @@ def _draw_market_screen(win, W, H, csym):
     # Each section up to 5 rows; header row + data rows
     SECTION_CAP = 5
     sections = [
-        ("🚀 TOP GAINERS",  P_GREEN, gainers[:SECTION_CAP]),
-        ("💥 TOP LOSERS",   P_RED,   losers[-SECTION_CAP:][::-1]),   # worst first
-        ("😐 FLAT / MIXED", P_MID,   neutral[:SECTION_CAP]),
+        ("TOP GAINERS",  P_GREEN, gainers[:SECTION_CAP]),
+        ("TOP LOSERS",   P_RED,   losers[-SECTION_CAP:][::-1]),   # worst first
+        ("FLAT / MIXED", P_MID,   neutral[:SECTION_CAP]),
     ]
 
     y = 7
@@ -7333,10 +7354,10 @@ _CUR_SYM_MAP = {
 def _ec_sub_header(win, W, H):
     """Draw the 4 sub-tab buttons for the ETF/Crypto view."""
     sub_tabs = [
-        (" 🪙 CRYPTO ",    0),
-        (" 📊 ETFs   ",    1),
-        (" 💱 FOREX  ",    2),
-        (" 🛢  COMMOD ",   3),
+        ("  CRYPTO  ",    0),
+        ("  ETF  ",       1),
+        ("  FOREX  ",     2),
+        ("  COMMODITIES  ", 3),
     ]
     ECS.sub_regions = []
     tx = 2
