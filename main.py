@@ -3452,6 +3452,10 @@ def v_tars_dashboard(win, W, H):
     if not HAS_TARS_UI or not DS.tars_mode:
         return v_dashboard(win, W, H)  # Fallback to standard dashboard
     
+    # Helper to clip text
+    def _clip(s, n):
+        return s if len(s) <= n else s[:max(1, n-1)] + "..."
+    
     now = datetime.datetime.now()
     sd = SD.snap()
     
