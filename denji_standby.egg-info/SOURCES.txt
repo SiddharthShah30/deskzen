@@ -1,8 +1,15 @@
 README.md
 main.py
 pyproject.toml
+denji_standby/__init__.py
+denji_standby/__main__.py
+denji_standby/launcher.py
+denji_standby/personality.py
+denji_standby/tars_ui.py
+denji_standby/voice.py
 denji_standby.egg-info/PKG-INFO
 denji_standby.egg-info/SOURCES.txt
 denji_standby.egg-info/dependency_links.txt
 denji_standby.egg-info/entry_points.txt
+denji_standby.egg-info/requires.txt
 denji_standby.egg-info/top_level.txt

@@ -52,6 +52,25 @@ except Exception:
     cv2 = None
     HAS_CV2 = False
 
+# ─── TARS AI Assistant System ────────────────────────────────────────────────
+try:
+    from denji_standby.tars_ui import TARSUIRenderer
+    HAS_TARS_UI = True
+except ImportError:
+    HAS_TARS_UI = False
+
+try:
+    from denji_standby.personality import get_personality_engine, set_global_humor
+    HAS_PERSONALITY = True
+except ImportError:
+    HAS_PERSONALITY = False
+
+try:
+    from denji_standby.voice import get_voice_engine
+    HAS_VOICE_ENGINE = True
+except ImportError:
+    HAS_VOICE_ENGINE = False
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  COLOURS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3068,6 +3087,15 @@ class DenjiState:
         self.camera_error = ""
         self._camera_stop = threading.Event()
         self._camera_thread: Any = None
+        # ─── TARS System Fields ─────────────────────────────────────
+        self.humor_level = 50.0           # 0-100: TARS humor adjustment
+        self.voice_enabled = HAS_VOICE_ENGINE
+        self.listening = False
+        self.voice_engine = get_voice_engine() if HAS_VOICE_ENGINE else None
+        self.personality = get_personality_engine(50.0) if HAS_PERSONALITY else None
+        self.tars_mode = True             # Toggle between standard and TARS UI
+        self.last_voiced_command = ""
+        self.voice_timeout = 0.0
 
 
 _DENJI_TTS_LOCK = threading.Lock()
@@ -3260,47 +3288,52 @@ def denji_submit_command(cmd):
     DS.mood_until = time.time() + 0.55
     DS.stage_queue = [("processing", 0.85), ("speaking", 1.4), ("idle", 0.0)]
 
+    # Get personality response based on humor level
+    personality_response = ""
+    if HAS_PERSONALITY and DS.personality:
+        personality_response = DS.personality.generate_acknowledgment(c)
+
     if "play" in c and "music" in c:
         if not AUDIO.playing:
             AUDIO.toggle_play()
-        DS.response_text = "Playing your music"
+        DS.response_text = personality_response or "Playing your music"
         DS.last_action = "Music playback started"
     elif "pause" in c and "music" in c:
         if AUDIO.playing:
             AUDIO.toggle_play()
-        DS.response_text = "Pausing your music"
+        DS.response_text = personality_response or "Pausing your music"
         DS.last_action = "Music playback paused"
     elif "next" in c and ("track" in c or "song" in c or "music" in c):
         AUDIO.next_track()
-        DS.response_text = "Skipping to the next track"
+        DS.response_text = personality_response or "Skipping to the next track"
         DS.last_action = "Advanced to next track"
     elif "focus" in c:
         ST.pomo_run = True
         ST._pw = time.time()
-        DS.response_text = "Starting focus mode"
+        DS.response_text = personality_response or "Starting focus mode"
         DS.last_action = "Pomodoro session started"
     elif "calendar" in c:
         ST.view = 5
-        DS.response_text = "Opening your calendar"
+        DS.response_text = personality_response or "Opening your calendar"
         DS.last_action = "Switched to calendar view"
     elif "network" in c:
         ST.view = 4
-        DS.response_text = "Opening network overview"
+        DS.response_text = personality_response or "Opening network overview"
         DS.last_action = "Switched to network view"
     elif "video" in c:
         ST.view = 6
-        DS.response_text = "Opening video panel"
+        DS.response_text = personality_response or "Opening video panel"
         DS.last_action = "Switched to video view"
     elif "news" in c:
         ST.view = HUB_VIEW_IDX
-        DS.response_text = "Opening news and market hub"
+        DS.response_text = personality_response or "Opening news and market hub"
         DS.last_action = "Switched to news hub"
     elif "system" in c and "snapshot" in c:
         ST.view = 3
-        DS.response_text = "Opening system overview"
+        DS.response_text = personality_response or "Opening system overview"
         DS.last_action = "Switched to neofetch view"
     else:
-        DS.response_text = "I got that. Tell me what to run next."
+        DS.response_text = personality_response or "I got that. Tell me what to run next."
         DS.last_action = "Command understood, waiting for exact action"
 
     denji_speak(DS.response_text)
@@ -3410,6 +3443,127 @@ def ascii_clock_lines(time_text):
 
 def next_event():
     return get_next_event()
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TARS DASHBOARD (AI Assistant Interface)
+# ══════════════════════════════════════════════════════════════════════════════
+def v_tars_dashboard(win, W, H):
+    """TARS-inspired geometric AI dashboard"""
+    if not HAS_TARS_UI or not DS.tars_mode:
+        return v_dashboard(win, W, H)  # Fallback to standard dashboard
+    
+    now = datetime.datetime.now()
+    sd = SD.snap()
+    
+    # Color mapping for TARS UI
+    color_map = {
+        'P_DIM': P_DIM, 'P_HI': P_HI, 'P_CYAN': P_CYAN, 
+        'P_PINK': P_PINK, 'P_BLUE': P_BLUE, 'P_GREEN': P_GREEN,
+        'P_AMBER': P_AMBER, 'P_RED': P_RED, 'P_MID': P_MID
+    }
+    renderer = TARSUIRenderer(color_map)
+    
+    # ─── LAYOUT ─────────────────────────────────────────────────────────────
+    if W < 100 or H < 24:
+        # Compact mode for small terminals
+        centre(win, 1, "TARS COMMAND INTERFACE", cp(P_CYAN, bold=True))
+        put(win, 2, 0, "─" * W, cp(P_BOX))
+        centre(win, 4, denji_face(DS.mood), cp(P_CYAN, bold=True))
+        centre(win, 6, f"Status: {DS.mood.upper()}", cp(P_GREEN if DS.mood == "idle" else P_AMBER))
+        centre(win, 8, f"Humor Level: {DS.humor_level:.0f}%", cp(P_PINK))
+        centre(win, 10, _clip(f"Input: {DS.user_text}", W - 4), cp(P_HI))
+        centre(win, 12, _clip(f"Response: {DS.response_text}", W - 4), cp(P_GREEN))
+        
+        voice_status = "🎤 Listening" if DS.listening else "🎤 Ready" if DS.voice_enabled else "🎤 Offline"
+        centre(win, H - 3, voice_status, cp(P_CYAN))
+        put(win, H - 1, 0, " [t]ype  [v]oice  [+/-]humor  [h]elp  [q]uit ", cp(P_DIM))
+        return
+    
+    # ─── FULL LAYOUT ────────────────────────────────────────────────────────
+    header_h = 3
+    footer_h = 3
+    content_h = H - header_h - footer_h
+    
+    # Header with title
+    centre(win, 1, "╔═══ TARS COMMAND INTERFACE ═══╗", cp(P_CYAN, bold=True))
+    put(win, 2, 0, "─" * W, cp(P_BOX))
+    
+    # Calculate panel layout: 2 columns
+    left_w = W // 2 - 1
+    right_x = left_w + 1
+    right_w = W - right_x
+    
+    # ─── LEFT COLUMN: PERSONALITY & STATUS ──────────────────────────────────
+    panel_h = max(8, (content_h - 1) // 2)
+    
+    # TOP-LEFT: PERSONALITY & HUMOR
+    renderer.draw_segment_box(win, header_h, 0, panel_h, left_w, "PERSONALITY", 
+                            color=P_PINK)
+    face_y = header_h + 2
+    centre(win, face_y, denji_face(DS.mood), cp(P_CYAN, bold=True))
+    
+    status_text = f"Status: {DS.mood.upper()}"
+    centre(win, face_y + 2, status_text, cp(P_GREEN if DS.mood == "idle" else P_AMBER))
+    
+    # Humor slider
+    slider_y = header_h + panel_h - 2
+    renderer.draw_percentage_bar(win, slider_y, 1, left_w - 2, DS.humor_level, 
+                               label="Humor", bar_color=P_PINK, show_percent=True)
+    
+    # BOTTOM-LEFT: VOICE STATUS
+    bottom_y = header_h + panel_h + 1
+    renderer.draw_segment_box(win, bottom_y, 0, max(8, content_h - panel_h - 1), left_w, 
+                            "VOICE CONTROL", color=P_CYAN)
+    
+    renderer.draw_status_indicator(win, bottom_y + 2, 1, DS.mic_status, 
+                                 active_color=P_GREEN, inactive_color=P_DIM)
+    renderer.draw_status_indicator(win, bottom_y + 3, 1, DS.tts_status,
+                                 active_color=P_GREEN, inactive_color=P_DIM)
+    
+    listening_text = "● LISTENING..." if DS.listening else "○ Ready"
+    put(win, bottom_y + 4, 1, listening_text, 
+        cp(P_BLUE, bold=True) if DS.listening else cp(P_DIM))
+    
+    # ─── RIGHT COLUMN: COMMAND & RESPONSES ──────────────────────────────────
+    
+    # TOP-RIGHT: USER INPUT
+    renderer.draw_segment_box(win, header_h, right_x, panel_h // 2, right_w, 
+                            "USER INPUT", color=P_HI)
+    put(win, header_h + 1, right_x + 1, "Command:", cp(P_DIM))
+    user_display = _clip(DS.user_text, right_w - 4)
+    put(win, header_h + 2, right_x + 1, f"› {user_display}", cp(P_HI, bold=True))
+    
+    # MIDDLE-RIGHT: RESPONSE
+    mid_y = header_h + (panel_h // 2) + 1
+    renderer.draw_segment_box(win, mid_y, right_x, (panel_h // 2) - 1, right_w,
+                            "RESPONSE", color=P_GREEN)
+    response_display = _clip(DS.response_text, right_w - 4)
+    put(win, mid_y + 1, right_x + 1, f"▸ {response_display}", cp(P_GREEN))
+    
+    # BOTTOM-RIGHT: SYSTEM INFO
+    system_y = header_h + panel_h + 1
+    renderer.draw_segment_box(win, system_y, right_x, max(8, content_h - panel_h - 1), right_w,
+                            "SYSTEM", color=P_BLUE)
+    
+    # Show CPU/Memory
+    cpu_pct = sd.get("cpu", 0)
+    mem_pct = sd.get("memory", 0)
+    renderer.draw_percentage_bar(win, system_y + 2, right_x + 1, right_w - 3, cpu_pct,
+                               label="CPU", bar_color=P_BLUE, show_percent=True)
+    renderer.draw_percentage_bar(win, system_y + 3, right_x + 1, right_w - 3, mem_pct,
+                               label="RAM", bar_color=P_CYAN, show_percent=True)
+    
+    # Show current track
+    track = AUDIO.current.get("name", "No track") if AUDIO.current else "No track"
+    track = _clip(track, right_w - 6)
+    put(win, system_y + 4, right_x + 1, f"♫ {track}", cp(P_PINK))
+    
+    # ─── FOOTER ─────────────────────────────────────────────────────────────
+    put(win, H - 2, 0, "─" * W, cp(P_BOX))
+    
+    # Shortcut hints with TARS flair
+    hint_text = " [v]oice  [t]ype  [+/-]humor  [←→]views  [↑↓]scroll  [?]help  [q]uit "
+    put(win, H - 1, max(0, (W - len(hint_text)) // 2), hint_text, cp(P_DIM))
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  VIEW 1 — DASHBOARD (REVAMPED)
@@ -5424,6 +5578,16 @@ def handle_key(k):
             return
         if v == 0 and k in (ord('v'), ord('V')):
             denji_listen_once()
+            return
+        if v == 0 and k in (ord('+'), ord('=')):
+            DS.humor_level = min(100, DS.humor_level + 5)
+            if HAS_PERSONALITY:
+                set_global_humor(DS.humor_level)
+            return
+        if v == 0 and k in (ord('-'), ord('_')):
+            DS.humor_level = max(0, DS.humor_level - 5)
+            if HAS_PERSONALITY:
+                set_global_humor(DS.humor_level)
             return
         if v == 0 and k in (ord('c'), ord('C')):
             denji_toggle_camera()
@@ -7651,7 +7815,7 @@ _init_nss_country()
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
-VIEW_FNS = [v_dashboard, v_clock, v_focus, v_neofetch, v_network,
+VIEW_FNS = [v_tars_dashboard, v_clock, v_focus, v_neofetch, v_network,
             v_calendar, v_video, v_news_market_hub, v_news_stocks, v_etf_crypto]
 
 def _in_text_input_mode():
