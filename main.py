@@ -3091,11 +3091,51 @@ class DenjiState:
         self.humor_level = 50.0           # 0-100: TARS humor adjustment
         self.voice_enabled = HAS_VOICE_ENGINE
         self.listening = False
-        self.voice_engine = get_voice_engine() if HAS_VOICE_ENGINE else None
+        self.voice_engine = None
         self.personality = get_personality_engine(50.0) if HAS_PERSONALITY else None
         self.tars_mode = True             # Toggle between standard and TARS UI
         self.last_voiced_command = ""
         self.voice_timeout = 0.0
+        self.boot_status = "BOOT"
+        self.boot_note = "Starting systems"
+
+
+_DENJI_BOOT_LOCK = threading.Lock()
+_DENJI_BOOT_DONE = False
+
+
+def denji_startup_boot():
+    """One-time startup warmup that never blocks or crashes app launch."""
+    global _DENJI_BOOT_DONE
+    if _DENJI_BOOT_DONE:
+        return
+    with _DENJI_BOOT_LOCK:
+        if _DENJI_BOOT_DONE:
+            return
+        try:
+            DS.boot_status = "INIT"
+            DS.boot_note = "Calibrating personality core"
+            if HAS_PERSONALITY and DS.personality is None:
+                DS.personality = get_personality_engine(DS.humor_level)
+
+            DS.boot_note = "Warming voice channels"
+            if HAS_VOICE_ENGINE and DS.voice_enabled and DS.voice_engine is None:
+                try:
+                    DS.voice_engine = get_voice_engine()
+                    st = DS.voice_engine.get_status()
+                    DS.mic_status = st.get("sr", DS.mic_status)
+                    DS.tts_status = st.get("tts", DS.tts_status)
+                except Exception:
+                    DS.voice_enabled = False
+                    DS.mic_status = "Offline"
+                    DS.tts_status = "Offline"
+
+            DS.boot_status = "READY"
+            DS.boot_note = "All systems online"
+        except Exception:
+            DS.boot_status = "SAFE"
+            DS.boot_note = "Booted in safe mode"
+        _DENJI_BOOT_DONE = True
 
 
 _DENJI_TTS_LOCK = threading.Lock()
@@ -3212,6 +3252,7 @@ def _denji_listen_worker():
         DS.last_action = "Install SpeechRecognition and PyAudio"
         return
     try:
+        DS.listening = True
         DS.mic_status = "Listening"
         recognizer = sr.Recognizer()
         with sr.Microphone() as source:
@@ -3228,6 +3269,8 @@ def _denji_listen_worker():
         DS.mic_status = "Ready" if HAS_SR else "Offline"
         DS.response_text = "I could not catch that. Try typing command with T."
         DS.last_action = "Voice listen timeout/failure"
+    finally:
+        DS.listening = False
 
 
 def denji_listen_once():
@@ -3238,6 +3281,11 @@ def denji_listen_once():
         DS.mood_until = time.time() + 0.5
         DS.stage_queue = [("idle", 0.0)]
         return
+    if DS.voice_engine is None and HAS_VOICE_ENGINE:
+        try:
+            DS.voice_engine = get_voice_engine()
+        except Exception:
+            pass
     DS.mood = "listening"
     DS.mood_until = time.time() + 0.7
     DS.stage_queue = [("processing", 0.6), ("idle", 0.0)]
@@ -3458,116 +3506,108 @@ def v_tars_dashboard(win, W, H):
     
     now = datetime.datetime.now()
     sd = SD.snap()
-    
-    # Color mapping for TARS UI
-    color_map = {
-        'P_DIM': P_DIM, 'P_HI': P_HI, 'P_CYAN': P_CYAN, 
-        'P_PINK': P_PINK, 'P_BLUE': P_BLUE, 'P_GREEN': P_GREEN,
-        'P_AMBER': P_AMBER, 'P_RED': P_RED, 'P_MID': P_MID
-    }
-    renderer = TARSUIRenderer(color_map)
-    
-    # ─── LAYOUT ─────────────────────────────────────────────────────────────
-    if W < 100 or H < 24:
-        # Compact mode for small terminals
-        centre(win, 1, "TARS COMMAND INTERFACE", cp(P_CYAN, bold=True))
-        put(win, 2, 0, "─" * W, cp(P_BOX))
-        centre(win, 4, denji_face(DS.mood), cp(P_CYAN, bold=True))
-        centre(win, 6, f"Status: {DS.mood.upper()}", cp(P_GREEN if DS.mood == "idle" else P_AMBER))
-        centre(win, 8, f"Humor Level: {DS.humor_level:.0f}%", cp(P_PINK))
-        centre(win, 10, _clip(f"Input: {DS.user_text}", W - 4), cp(P_HI))
-        centre(win, 12, _clip(f"Response: {DS.response_text}", W - 4), cp(P_GREEN))
-        
-        voice_status = "🎤 Listening" if DS.listening else "🎤 Ready" if DS.voice_enabled else "🎤 Offline"
-        centre(win, H - 3, voice_status, cp(P_CYAN))
-        put(win, H - 1, 0, " [t]ype  [v]oice  [+/-]humor  [h]elp  [q]uit ", cp(P_DIM))
+
+    if W < 96 or H < 24:
+        box(win, 1, 0, H - 2, W - 1, "D E N J I   C O R E")
+        centre(win, 3, denji_face(DS.mood), cp(P_CYAN, bold=True))
+        centre(win, 5, f"STATE {DS.mood.upper()}  |  BOOT {DS.boot_status}", cp(P_MID, bold=True))
+        centre(win, 7, _clip(f"INPUT  {DS.user_text}", W - 6), cp(P_HI))
+        centre(win, 8, _clip(f"OUTPUT {DS.response_text}", W - 6), cp(P_GREEN))
+        centre(win, 10, f"HUMOR {int(DS.humor_level):3d}%", cp(P_PINK, bold=True))
+        hbar(win, 11, max(2, (W - 30) // 2), min(26, W - 4), DS.humor_level, P_PINK)
+        voice_label = "VOICE LISTENING" if DS.listening else "VOICE READY" if DS.voice_enabled else "VOICE OFFLINE"
+        centre(win, H - 3, voice_label, cp(P_CYAN if DS.voice_enabled else P_DIM, bold=True))
+        put(win, H - 1, 0, " t type  v voice  + - humor  c camera  space play  left/right views  q quit ", cp(P_DIM))
         return
-    
-    # ─── FULL LAYOUT ────────────────────────────────────────────────────────
-    header_h = 3
-    footer_h = 3
-    content_h = H - header_h - footer_h
-    
-    # Header with title
-    centre(win, 1, "╔═══ TARS COMMAND INTERFACE ═══╗", cp(P_CYAN, bold=True))
-    put(win, 2, 0, "─" * W, cp(P_BOX))
-    
-    # Calculate panel layout: 2 columns
-    left_w = W // 2 - 1
-    right_x = left_w + 1
-    right_w = W - right_x
-    
-    # ─── LEFT COLUMN: PERSONALITY & STATUS ──────────────────────────────────
-    panel_h = max(8, (content_h - 1) // 2)
-    
-    # TOP-LEFT: PERSONALITY & HUMOR
-    renderer.draw_segment_box(win, header_h, 0, panel_h, left_w, "PERSONALITY", 
-                            color=P_PINK)
-    face_y = header_h + 2
-    centre(win, face_y, denji_face(DS.mood), cp(P_CYAN, bold=True))
-    
-    status_text = f"Status: {DS.mood.upper()}"
-    centre(win, face_y + 2, status_text, cp(P_GREEN if DS.mood == "idle" else P_AMBER))
-    
-    # Humor slider
-    slider_y = header_h + panel_h - 2
-    renderer.draw_percentage_bar(win, slider_y, 1, left_w - 2, DS.humor_level, 
-                               label="Humor", bar_color=P_PINK, show_percent=True)
-    
-    # BOTTOM-LEFT: VOICE STATUS
-    bottom_y = header_h + panel_h + 1
-    renderer.draw_segment_box(win, bottom_y, 0, max(8, content_h - panel_h - 1), left_w, 
-                            "VOICE CONTROL", color=P_CYAN)
-    
-    renderer.draw_status_indicator(win, bottom_y + 2, 1, DS.mic_status, 
-                                 active_color=P_GREEN, inactive_color=P_DIM)
-    renderer.draw_status_indicator(win, bottom_y + 3, 1, DS.tts_status,
-                                 active_color=P_GREEN, inactive_color=P_DIM)
-    
-    listening_text = "● LISTENING..." if DS.listening else "○ Ready"
-    put(win, bottom_y + 4, 1, listening_text, 
-        cp(P_BLUE, bold=True) if DS.listening else cp(P_DIM))
-    
-    # ─── RIGHT COLUMN: COMMAND & RESPONSES ──────────────────────────────────
-    
-    # TOP-RIGHT: USER INPUT
-    renderer.draw_segment_box(win, header_h, right_x, panel_h // 2, right_w, 
-                            "USER INPUT", color=P_HI)
-    put(win, header_h + 1, right_x + 1, "Command:", cp(P_DIM))
-    user_display = _clip(DS.user_text, right_w - 4)
-    put(win, header_h + 2, right_x + 1, f"› {user_display}", cp(P_HI, bold=True))
-    
-    # MIDDLE-RIGHT: RESPONSE
-    mid_y = header_h + (panel_h // 2) + 1
-    renderer.draw_segment_box(win, mid_y, right_x, (panel_h // 2) - 1, right_w,
-                            "RESPONSE", color=P_GREEN)
-    response_display = _clip(DS.response_text, right_w - 4)
-    put(win, mid_y + 1, right_x + 1, f"▸ {response_display}", cp(P_GREEN))
-    
-    # BOTTOM-RIGHT: SYSTEM INFO
-    system_y = header_h + panel_h + 1
-    renderer.draw_segment_box(win, system_y, right_x, max(8, content_h - panel_h - 1), right_w,
-                            "SYSTEM", color=P_BLUE)
-    
-    # Show CPU/Memory
-    cpu_pct = sd.get("cpu", 0)
-    mem_pct = sd.get("memory", 0)
-    renderer.draw_percentage_bar(win, system_y + 2, right_x + 1, right_w - 3, cpu_pct,
-                               label="CPU", bar_color=P_BLUE, show_percent=True)
-    renderer.draw_percentage_bar(win, system_y + 3, right_x + 1, right_w - 3, mem_pct,
-                               label="RAM", bar_color=P_CYAN, show_percent=True)
-    
-    # Show current track
+
+    # Cinematic sci-fi header band
+    scan = int(time.time() * 2.7) % max(1, W - 10)
+    put(win, 0, 0, "=" * (W - 1), cp(P_BOX))
+    put(win, 1, 2, "DENJI // SYNTHETIC COMMAND BRIDGE", cp(P_CYAN, bold=True))
+    put(win, 1, max(2, W - 26), now.strftime("%H:%M:%S  %d %b %Y"), cp(P_DIM))
+    put(win, 2, 0, "-" * scan, cp(P_BLUE))
+    put(win, 2, scan, ">>>", cp(P_PINK, bold=True))
+    put(win, 2, scan + 3, "-" * max(0, W - scan - 4), cp(P_BLUE))
+
+    # Main geometry
+    top = 3
+    body_h = H - 7
+    left_w = max(30, W // 4)
+    right_w = max(34, W // 3)
+    center_w = max(26, W - left_w - right_w - 2)
+    left_x = 0
+    center_x = left_w + 1
+    right_x = center_x + center_w + 1
+
+    box(win, top, left_x, body_h, left_w, "SHIP TELEMETRY")
+    box(win, top, center_x, body_h, center_w, "NEURAL CORE")
+    box(win, top, right_x, body_h, right_w, "MISSION CHANNEL")
+
+    # Left: telemetry stack
+    cpu_pct = float(sd.get("cpu", 0))
+    mem_pct = float(sd.get("memory", 0))
+    hum_pct = float(DS.humor_level)
+    away_pct = min(100.0, DS.user_away_secs * 4.0)
+
+    put(win, top + 2, left_x + 2, "CPU", cp(P_DIM));   hbar(win, top + 3, left_x + 2, left_w - 4, cpu_pct, P_BLUE)
+    put(win, top + 5, left_x + 2, "RAM", cp(P_DIM));   hbar(win, top + 6, left_x + 2, left_w - 4, mem_pct, P_CYAN)
+    put(win, top + 8, left_x + 2, "HUMOR", cp(P_DIM)); hbar(win, top + 9, left_x + 2, left_w - 4, hum_pct, P_PINK)
+    put(win, top + 11, left_x + 2, "IDLE DRIFT", cp(P_DIM)); hbar(win, top + 12, left_x + 2, left_w - 4, away_pct, P_AMBER)
+
+    voice_line = f"MIC {DS.mic_status:<8}  TTS {DS.tts_status:<8}"
+    cam_line = f"CAM {'ON' if DS.camera_enabled else 'OFF'}  FACE {'LOCK' if DS.face_seen else 'SEARCH'}"
+    put(win, top + body_h - 4, left_x + 2, _clip(voice_line, left_w - 4), cp(P_MID))
+    put(win, top + body_h - 3, left_x + 2, _clip(cam_line, left_w - 4), cp(P_MID))
+    put(win, top + body_h - 2, left_x + 2, _clip(f"BOOT {DS.boot_status} // {DS.boot_note}", left_w - 4), cp(P_GREEN if DS.boot_status == "READY" else P_AMBER, bold=True))
+
+    # Center: neural core and interaction
+    core_face = denji_face(DS.mood)
+    centre(win, top + 2, core_face, cp(P_CYAN, bold=True))
+    centre(win, top + 3, f"STATE :: {DS.mood.upper()}", cp(P_HI, bold=True))
+    centre(win, top + 4, f"ATTN VECTOR :: {DS.eye_x:+d},{DS.eye_y:+d}", cp(P_DIM))
+
+    pulse = "|" * (1 + int((math.sin(time.time() * 4.0) + 1.0) * 6.0))
+    centre(win, top + 6, f"[{pulse:<13}]", cp(P_BLUE, bold=True))
+
+    cmd_line = _clip(f"INPUT  > {DS.user_text}", center_w - 4)
+    rsp_line = _clip(f"OUTPUT > {DS.response_text}", center_w - 4)
+    put(win, top + 9, center_x + 2, cmd_line, cp(P_HI))
+    put(win, top + 10, center_x + 2, rsp_line, cp(P_GREEN))
+    put(win, top + 12, center_x + 2, _clip(f"LAST ACTION :: {DS.last_action}", center_w - 4), cp(P_MID))
+
+    if DS.mood == "speaking":
+        spec = ST._spec_smooth[:max(8, center_w - 6)]
+        bars = ""
+        for v in spec:
+            lvl = max(0, min(7, int(v * 8)))
+            bars += "._-:=+*#"[lvl]
+        put(win, top + body_h - 3, center_x + 2, _clip(bars, center_w - 4), cp(P_PINK, bold=True))
+    else:
+        put(win, top + body_h - 3, center_x + 2, _clip("VOICE BUS // IDLE CARRIER", center_w - 4), cp(P_DIM))
+
+    # Right: mission/news/track stack
+    items = get_news_items()
+    head_1 = items[0].get("title", "No headline") if items else "No headline"
+    head_2 = items[1].get("title", "No update") if len(items) > 1 else "No update"
     track = AUDIO.current.get("name", "No track") if AUDIO.current else "No track"
-    track = _clip(track, right_w - 6)
-    put(win, system_y + 4, right_x + 1, f"♫ {track}", cp(P_PINK))
-    
-    # ─── FOOTER ─────────────────────────────────────────────────────────────
-    put(win, H - 2, 0, "─" * W, cp(P_BOX))
-    
-    # Shortcut hints with TARS flair
-    hint_text = " [v]oice  [t]ype  [+/-]humor  [←→]views  [↑↓]scroll  [?]help  [q]uit "
-    put(win, H - 1, max(0, (W - len(hint_text)) // 2), hint_text, cp(P_DIM))
+
+    put(win, top + 2, right_x + 2, "NOW PLAYING", cp(P_DIM))
+    put(win, top + 3, right_x + 2, _clip(track, right_w - 4), cp(P_PINK, bold=True))
+    put(win, top + 5, right_x + 2, f"AUDIO {'LIVE' if AUDIO.playing else 'PAUSED'}", cp(P_GREEN if AUDIO.playing else P_AMBER, bold=True))
+
+    put(win, top + 7, right_x + 2, "GLOBAL FEED", cp(P_DIM))
+    put(win, top + 8, right_x + 2, _clip(head_1, right_w - 4), cp(P_HI))
+    put(win, top + 9, right_x + 2, _clip(head_2, right_w - 4), cp(P_MID))
+
+    put(win, top + 11, right_x + 2, "SUBSYSTEMS", cp(P_DIM))
+    put(win, top + 12, right_x + 2, _clip(f"NET {NS.quality}  DOWN {kbfmt(NS.down)}  UP {kbfmt(NS.up)}", right_w - 4), cp(P_CYAN))
+    put(win, top + 13, right_x + 2, _clip(f"VIEW {ALL_VIEW_NAMES[ST.view] if 0 <= ST.view < len(ALL_VIEW_NAMES) else 'UNKNOWN'}", right_w - 4), cp(P_BLUE))
+
+    # Footer command rail
+    put(win, H - 3, 0, "=" * (W - 1), cp(P_BOX))
+    rail = " t type | v voice | + - humor | c camera | space play | z/x track | left/right view | q quit "
+    put(win, H - 2, max(0, (W - len(rail)) // 2), rail, cp(P_DIM))
+    put(win, H - 1, max(0, (W - 40) // 2), "DENJI SYNTHETIC INTERFACE // LIVE", cp(P_CYAN, bold=True))
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  VIEW 1 — DASHBOARD (REVAMPED)
@@ -8001,6 +8041,7 @@ def move_console_to_secondary_display():
 
 def run_denji():
     displays = move_console_to_secondary_display()
+    threading.Thread(target=denji_startup_boot, daemon=True).start()
 
     backend = AUDIO._backend or ""
     if not backend:
