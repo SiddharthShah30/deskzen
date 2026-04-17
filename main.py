@@ -3600,7 +3600,10 @@ def v_tars_dashboard(win, W, H):
     put(win, top + 9, right_x + 2, _clip(head_2, right_w - 4), cp(P_MID))
 
     put(win, top + 11, right_x + 2, "SUBSYSTEMS", cp(P_DIM))
-    put(win, top + 12, right_x + 2, _clip(f"NET {NS.quality}  DOWN {kbfmt(NS.down)}  UP {kbfmt(NS.up)}", right_w - 4), cp(P_CYAN))
+    net_name = sd.get("ssid", "N/A")
+    net_dn = sd.get("net_dn", 0.0)
+    net_up = sd.get("net_up", 0.0)
+    put(win, top + 12, right_x + 2, _clip(f"NET {net_name}  DOWN {kbfmt(net_dn)}  UP {kbfmt(net_up)}", right_w - 4), cp(P_CYAN))
     put(win, top + 13, right_x + 2, _clip(f"VIEW {ALL_VIEW_NAMES[ST.view] if 0 <= ST.view < len(ALL_VIEW_NAMES) else 'UNKNOWN'}", right_w - 4), cp(P_BLUE))
 
     # Footer command rail
