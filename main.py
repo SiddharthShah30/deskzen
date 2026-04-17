@@ -3173,7 +3173,12 @@ def _denji_camera_loop():
     cap = None
     face_cascade = None
     try:
-        cap = cv2.VideoCapture(0)
+        if platform.system() == "Windows" and hasattr(cv2, "CAP_DSHOW"):
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            if not cap or not cap.isOpened():
+                cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+        else:
+            cap = cv2.VideoCapture(0)
         if not cap or not cap.isOpened():
             DS.camera_status = "Unavailable"
             return
@@ -3239,6 +3244,7 @@ def denji_toggle_camera():
 
     DS._camera_stop = threading.Event()
     DS.camera_enabled = True
+    DS.camera_status = "Starting"
     DS.camera_error = ""
     DS._camera_thread = threading.Thread(target=_denji_camera_loop, daemon=True)
     DS._camera_thread.start()
@@ -3246,19 +3252,17 @@ def denji_toggle_camera():
 
 
 def _denji_listen_worker():
-    if not HAS_SR:
-        DS.mic_status = "Offline"
-        DS.response_text = "Microphone STT is offline"
-        DS.last_action = "Install SpeechRecognition and PyAudio"
-        return
     try:
         DS.listening = True
         DS.mic_status = "Listening"
-        recognizer = sr.Recognizer()
-        with sr.Microphone() as source:
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            audio = recognizer.listen(source, timeout=4, phrase_time_limit=6)
-        text = recognizer.recognize_google(audio)
+        engine = DS.voice_engine or (get_voice_engine() if HAS_VOICE_ENGINE else None)
+        if engine is None:
+            DS.mic_status = "Offline"
+            DS.response_text = "Voice engine unavailable"
+            DS.last_action = "Voice engine missing"
+            return
+
+        text = engine.listen(timeout=6.0, on_audio_received=lambda msg: setattr(DS, "mic_status", msg.replace("...", "")))
         DS.mic_status = "Ready"
         if text.strip():
             cmd = text.strip()
@@ -3266,7 +3270,7 @@ def _denji_listen_worker():
                 cmd = f"Denji {cmd}"
             denji_submit_command(cmd)
     except Exception:
-        DS.mic_status = "Ready" if HAS_SR else "Offline"
+        DS.mic_status = "Ready" if (HAS_SR or HAS_VOICE_ENGINE) else "Offline"
         DS.response_text = "I could not catch that. Try typing command with T."
         DS.last_action = "Voice listen timeout/failure"
     finally:
@@ -3274,7 +3278,7 @@ def _denji_listen_worker():
 
 
 def denji_listen_once():
-    if not HAS_SR:
+    if not (HAS_SR or HAS_VOICE_ENGINE):
         DS.input_mode = True
         DS.input_buf = "Denji play music"
         DS.mood = "listening"
@@ -3503,6 +3507,25 @@ def v_tars_dashboard(win, W, H):
     # Helper to clip text
     def _clip(s, n):
         return s if len(s) <= n else s[:max(1, n-1)] + "..."
+
+    def _wrap(s, width, limit=3):
+        words = (s or "").split()
+        if not words or width <= 1:
+            return [""]
+        lines = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            if len(candidate) <= width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+                if len(lines) >= limit:
+                    break
+        if len(lines) < limit and current:
+            lines.append(current)
+        return lines[:limit]
     
     now = datetime.datetime.now()
     sd = SD.snap()
@@ -3590,21 +3613,25 @@ def v_tars_dashboard(win, W, H):
     head_1 = items[0].get("title", "No headline") if items else "No headline"
     head_2 = items[1].get("title", "No update") if len(items) > 1 else "No update"
     track = AUDIO.current.get("name", "No track") if AUDIO.current else "No track"
+    right_text_w = max(10, right_w - 4)
 
     put(win, top + 2, right_x + 2, "NOW PLAYING", cp(P_DIM))
-    put(win, top + 3, right_x + 2, _clip(track, right_w - 4), cp(P_PINK, bold=True))
+    for i, line in enumerate(_wrap(track, right_text_w, limit=2)):
+        put(win, top + 3 + i, right_x + 2, line, cp(P_PINK, bold=True))
     put(win, top + 5, right_x + 2, f"AUDIO {'LIVE' if AUDIO.playing else 'PAUSED'}", cp(P_GREEN if AUDIO.playing else P_AMBER, bold=True))
 
     put(win, top + 7, right_x + 2, "GLOBAL FEED", cp(P_DIM))
-    put(win, top + 8, right_x + 2, _clip(head_1, right_w - 4), cp(P_HI))
-    put(win, top + 9, right_x + 2, _clip(head_2, right_w - 4), cp(P_MID))
+    feed_lines = _wrap(head_1, right_text_w, limit=2) + _wrap(head_2, right_text_w, limit=2)
+    for i, line in enumerate(feed_lines[:4]):
+        put(win, top + 8 + i, right_x + 2, line, cp(P_HI if i < 2 else P_MID))
 
-    put(win, top + 11, right_x + 2, "SUBSYSTEMS", cp(P_DIM))
+    put(win, top + 12, right_x + 2, "SUBSYSTEMS", cp(P_DIM))
     net_name = sd.get("ssid", "N/A")
     net_dn = sd.get("net_dn", 0.0)
     net_up = sd.get("net_up", 0.0)
-    put(win, top + 12, right_x + 2, _clip(f"NET {net_name}  DOWN {kbfmt(net_dn)}  UP {kbfmt(net_up)}", right_w - 4), cp(P_CYAN))
-    put(win, top + 13, right_x + 2, _clip(f"VIEW {ALL_VIEW_NAMES[ST.view] if 0 <= ST.view < len(ALL_VIEW_NAMES) else 'UNKNOWN'}", right_w - 4), cp(P_BLUE))
+    put(win, top + 13, right_x + 2, _clip(f"NET {net_name}", right_text_w), cp(P_CYAN))
+    put(win, top + 14, right_x + 2, _clip(f"DOWN {kbfmt(net_dn)}   UP {kbfmt(net_up)}", right_text_w), cp(P_CYAN))
+    put(win, top + 15, right_x + 2, _clip(f"VIEW {ALL_VIEW_NAMES[ST.view] if 0 <= ST.view < len(ALL_VIEW_NAMES) else 'UNKNOWN'}", right_text_w), cp(P_BLUE))
 
     # Footer command rail
     put(win, H - 3, 0, "=" * (W - 1), cp(P_BOX))

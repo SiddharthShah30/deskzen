@@ -4,6 +4,9 @@ Handles voice input/output with proper error handling and threading
 """
 
 import threading
+import io
+import os
+import wave
 import time
 from typing import Callable, Optional, Any
 import importlib
@@ -15,6 +18,8 @@ HAS_SR = False
 # Lazy load dependencies
 pyttsx3: Any = None
 sr: Any = None
+sd: Any = None
+np: Any = None
 
 try:
     pyttsx3 = importlib.import_module("pyttsx3")
@@ -27,6 +32,15 @@ try:
     HAS_SR = True
 except Exception:
     HAS_SR = False
+
+try:
+    sd = importlib.import_module("sounddevice")
+    np = importlib.import_module("numpy")
+    HAS_SD = True
+except Exception:
+    sd = None
+    np = None
+    HAS_SD = False
 
 
 class VoiceEngine:
@@ -67,6 +81,9 @@ class VoiceEngine:
                 print(f"SR init error: {e}")
                 self.sr_status = "Error"
                 HAS_SR = False
+
+        if not HAS_SR and HAS_SD:
+            self.sr_status = "Ready"
     
     def speak(self, text: str, wait: bool = False) -> threading.Thread:
         """
@@ -113,6 +130,54 @@ class VoiceEngine:
         Returns:
             Recognized text, or empty string on failure
         """
+        if HAS_SD:
+            try:
+                self.is_listening = True
+                self.sr_status = "Listening"
+                if on_audio_received:
+                    on_audio_received("Listening...")
+
+                sample_rate = 16000
+                channels = 1
+                frames = int(sample_rate * max(1.0, timeout))
+                audio = sd.rec(frames, samplerate=sample_rate, channels=channels, dtype="float32")
+                sd.wait()
+
+                if on_audio_received:
+                    on_audio_received("Processing...")
+
+                audio_array = audio[:, 0]
+                audio_int16 = (audio_array * 32767).clip(-32768, 32767).astype(np.int16)
+                raw_bytes = audio_int16.tobytes()
+
+                if HAS_SR and sr is not None:
+                    recognizer = self.recognizer or sr.Recognizer()
+                    recognizer.energy_threshold = 4000
+                    if self.recognizer is None:
+                        self.recognizer = recognizer
+                    data = sr.AudioData(raw_bytes, sample_rate, 2)
+                    try:
+                        text = recognizer.recognize_google(data)
+                        self.last_recognized_text = text
+                        self.sr_status = "Ready"
+                        return text
+                    except sr.UnknownValueError:
+                        self.sr_status = "Ready"
+                        return ""
+                    except sr.RequestError as e:
+                        print(f"API error: {e}")
+                        self.sr_status = "Error"
+                        return ""
+
+                self.sr_status = "Offline"
+                return ""
+            except Exception as e:
+                print(f"Listen error: {e}")
+                self.sr_status = "Error"
+                return ""
+            finally:
+                self.is_listening = False
+
         if not HAS_SR or not self.recognizer:
             return ""
         
