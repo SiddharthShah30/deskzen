@@ -10,6 +10,7 @@ import os
 import json
 import threading
 import time
+import subprocess
 from typing import Any, Optional
 
 try:
@@ -17,6 +18,24 @@ try:
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
+
+
+def _check_opencode_available() -> bool:
+    """Check if OpenCode CLI is installed and available"""
+    try:
+        result = subprocess.run(
+            ["opencode", "--version"],
+            capture_output=True,
+            timeout=2,
+            text=True
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+HAS_OPENCODE = _check_opencode_available()
+
 
 
 class DenjiAI:
@@ -114,11 +133,11 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
         return response
     
     def _generate_response_local(self, user_input: str, mood: str, humor: float) -> Optional[str]:
-        """Try to use local/open LLM (Ollama, etc.)"""
-        # Check if Ollama is running locally
+        """Try to use local/open LLM (Ollama first, then OpenCode CLI)"""
+        
+        # Try Ollama local inference first
         if HAS_REQUESTS:
             try:
-                # Try Ollama local inference
                 response = requests.post(
                     "http://localhost:11434/api/generate",
                     json={
@@ -131,12 +150,57 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
                 )
                 if response.status_code == 200:
                     result = response.json()
-                    return result.get("response", "").strip()
+                    resp_text = result.get("response", "").strip()
+                    if resp_text:
+                        return resp_text
             except Exception:
                 pass
         
-        # Fallback: return None to trigger rule-based response
+        # Fallback: Try OpenCode CLI agent
+        if HAS_OPENCODE:
+            return self._generate_with_opencode(user_input, mood, humor)
+        
+        # Final fallback: return None to trigger rule-based response
         return None
+    
+    def _generate_with_opencode(self, user_input: str, mood: str, humor: float) -> Optional[str]:
+        """Call OpenCode CLI as AI agent fallback"""
+        try:
+            # Build the prompt with system context
+            full_prompt = f"""{self.system_prompt}
+
+Current Context:
+- User Input: {user_input}
+- Denji Mood: {mood}
+- Humor Level: {humor}%
+
+Respond as Denji's Neural Core in a single, concise line. Keep it professional yet personality-driven."""
+            
+            # Call OpenCode via CLI
+            result = subprocess.run(
+                ["opencode", "-m", full_prompt],
+                capture_output=True,
+                timeout=10,
+                text=True,
+                encoding="utf-8",
+                errors="replace"
+            )
+            
+            if result.returncode == 0 and result.stdout:
+                response = result.stdout.strip()
+                if response:
+                    # Clean up response - remove any markdown code blocks
+                    if response.startswith("```"):
+                        response = response.split("```")[1].strip()
+                    if response.endswith("```"):
+                        response = response.rsplit("```", 1)[0].strip()
+                    return response[:200]  # Limit to 200 chars for terminal display
+            
+            return None
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError, UnicodeError):
+            return None
+        except Exception:
+            return None
     
     def _fallback_response(self, user_input: str, mood: str, humor: float) -> str:
         """Rule-based fallback responses with Denji personality"""
