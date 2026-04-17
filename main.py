@@ -3591,20 +3591,14 @@ def v_tars_dashboard(win, W, H):
 
     voice_line = f"MIC {DS.mic_status:<8}  TTS {DS.tts_status:<8}"
     cam_line = f"CAM {'ON' if DS.camera_enabled else 'OFF'}  FACE {'LOCK' if DS.face_seen else 'SEARCH'}"
-    put(win, top + body_h - 4, left_x + 2, _clip(voice_line, left_w - 4), cp(P_MID))
-    put(win, top + body_h - 3, left_x + 2, _clip(cam_line, left_w - 4), cp(P_MID))
+    net_name = sd.get("ssid", "N/A")
+    net_dn = sd.get("net_dn", 0.0)
+    net_up = sd.get("net_up", 0.0)
+    put(win, top + body_h - 6, left_x + 2, _clip(voice_line, left_w - 4), cp(P_MID))
+    put(win, top + body_h - 5, left_x + 2, _clip(cam_line, left_w - 4), cp(P_MID))
+    put(win, top + body_h - 4, left_x + 2, _clip(f"NET {net_name}", left_w - 4), cp(P_CYAN))
+    put(win, top + body_h - 3, left_x + 2, _clip(f"DOWN {kbfmt(net_dn)}  UP {kbfmt(net_up)}", left_w - 4), cp(P_CYAN))
     put(win, top + body_h - 2, left_x + 2, _clip(f"BOOT {DS.boot_status} // {DS.boot_note}", left_w - 4), cp(P_GREEN if DS.boot_status == "READY" else P_AMBER, bold=True))
-
-    todo_y = top + 14
-    if todo_y < top + body_h - 5:
-        put(win, todo_y, left_x + 2, "TODOS", cp(P_DIM))
-        todo_count = len(ST.todos)
-        todo_done = sum(1 for done, _ in ST.todos if done)
-        put(win, todo_y + 1, left_x + 2, f"{todo_done}/{todo_count} completed", cp(P_AMBER))
-        for i, item in enumerate(ST.todos[:3]):
-            done, title = item
-            mark = "✓" if done else "○"
-            put(win, todo_y + 2 + i, left_x + 2, _clip(f"{mark} {title}", left_w - 4), cp(P_DIM if done else P_HI))
 
     # Center: neural core and interaction
     core_face = denji_face(DS.mood)
@@ -3650,13 +3644,16 @@ def v_tars_dashboard(win, W, H):
         put(win, top + 8 + i, right_x + 2, line, cp(P_HI if i < 2 else P_MID))
     put(win, top + 12, right_x + 2, "─" * max(0, right_text_w), cp(P_BOX))
 
-    put(win, top + 13, right_x + 2, "SUBSYSTEMS", cp(P_DIM))
-    net_name = sd.get("ssid", "N/A")
-    net_dn = sd.get("net_dn", 0.0)
-    net_up = sd.get("net_up", 0.0)
-    put(win, top + 14, right_x + 2, _clip(f"NET {net_name}", right_text_w), cp(P_CYAN))
-    put(win, top + 15, right_x + 2, _clip(f"DOWN {kbfmt(net_dn)}   UP {kbfmt(net_up)}", right_text_w), cp(P_CYAN))
-    put(win, top + 16, right_x + 2, _clip(f"VIEW {ALL_VIEW_NAMES[ST.view] if 0 <= ST.view < len(ALL_VIEW_NAMES) else 'UNKNOWN'}", right_text_w), cp(P_BLUE))
+    put(win, top + 13, right_x + 2, "TODO LIST", cp(P_DIM))
+    todo_count = len(ST.todos)
+    todo_done = sum(1 for done, _ in ST.todos if done)
+    put(win, top + 14, right_x + 2, f"{todo_done}/{todo_count} completed", cp(P_AMBER, bold=True))
+    put(win, top + 15, right_x + 2, "─" * max(0, right_text_w), cp(P_BOX))
+    for i, item in enumerate(ST.todos[:max(5, body_h - top - 19)]):
+        done, title = item
+        mark = "✓" if done else "○"
+        line = _clip(f"{mark} {title}", right_text_w - 2)
+        put(win, top + 16 + i, right_x + 2, line, cp(P_GREEN if done else P_HI))
 
     # Footer command rail
     put(win, H - 3, 0, "=" * (W - 1), cp(P_BOX))
