@@ -6,6 +6,7 @@ Handles voice input/output with proper error handling and threading
 import threading
 import io
 import os
+import subprocess
 import wave
 import time
 from typing import Callable, Optional, Any
@@ -42,12 +43,20 @@ except Exception:
     np = None
     HAS_SD = False
 
+try:
+    win32com_client = importlib.import_module("win32com.client")
+    HAS_SAPI = True
+except Exception:
+    win32com_client = None
+    HAS_SAPI = False
+
 
 class VoiceEngine:
     """TARS-inspired voice system with recognition and synthesis"""
     
     def __init__(self):
         self.tts_engine = None
+        self.sapi_engine = None
         self.recognizer = None
         self.tts_lock = threading.Lock()
         self.sr_lock = threading.Lock()
@@ -96,19 +105,49 @@ class VoiceEngine:
         Returns:
             Thread object (will be completed if wait=True)
         """
-        def _speak_worker():
-            if not HAS_TTS or not self.tts_engine:
+        def _sapi_fallback():
+            if os.name != "nt":
                 return
-            
             try:
-                with self.tts_lock:
+                if HAS_SAPI and win32com_client is not None:
+                    speaker = self.sapi_engine or win32com_client.Dispatch("SAPI.SpVoice")
+                    self.sapi_engine = speaker
                     self.tts_status = "Speaking"
-                    self.tts_engine.say(text)
-                    self.tts_engine.runAndWait()
+                    speaker.Speak(text)
                     self.tts_status = "Ready"
+                    return
+
+                safe_text = text.replace("'", "''")
+                ps_cmd = (
+                    "Add-Type -AssemblyName System.Speech; "
+                    "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                    f"$s.Speak('{safe_text}')"
+                )
+                self.tts_status = "Speaking"
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True,
+                    timeout=20,
+                    check=False,
+                )
+                self.tts_status = "Ready"
             except Exception as e:
-                print(f"TTS error: {e}")
+                print(f"SAPI fallback error: {e}")
                 self.tts_status = "Error"
+
+        def _speak_worker():
+            if HAS_TTS and self.tts_engine:
+                try:
+                    with self.tts_lock:
+                        self.tts_status = "Speaking"
+                        self.tts_engine.say(text)
+                        self.tts_engine.runAndWait()
+                        self.tts_status = "Ready"
+                        return
+                except Exception as e:
+                    print(f"TTS error: {e}")
+                    self.tts_status = "Error"
+            _sapi_fallback()
         
         thread = threading.Thread(target=_speak_worker, daemon=True)
         thread.start()

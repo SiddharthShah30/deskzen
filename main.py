@@ -3160,6 +3160,12 @@ def _denji_speak_worker(text):
 
 
 def denji_speak(text):
+    if DS.voice_engine is not None:
+        try:
+            DS.voice_engine.speak(text, wait=False)
+            return
+        except Exception:
+            pass
     if not HAS_TTS:
         return
     threading.Thread(target=lambda t=text: _denji_speak_worker(t), daemon=True).start()
@@ -3538,9 +3544,15 @@ def v_tars_dashboard(win, W, H):
         centre(win, 8, _clip(f"OUTPUT {DS.response_text}", W - 6), cp(P_GREEN))
         centre(win, 10, f"HUMOR {int(DS.humor_level):3d}%", cp(P_PINK, bold=True))
         hbar(win, 11, max(2, (W - 30) // 2), min(26, W - 4), DS.humor_level, P_PINK)
+        todo_count = len(ST.todos)
+        todo_done = sum(1 for done, _ in ST.todos if done)
+        centre(win, 13, f"TODOS {todo_done}/{todo_count}", cp(P_AMBER, bold=True))
+        if ST.todos:
+            first_todo = ST.todos[0][1]
+            centre(win, 14, _clip(f"1. {first_todo}", W - 6), cp(P_DIM))
         voice_label = "VOICE LISTENING" if DS.listening else "VOICE READY" if DS.voice_enabled else "VOICE OFFLINE"
         centre(win, H - 3, voice_label, cp(P_CYAN if DS.voice_enabled else P_DIM, bold=True))
-        put(win, H - 1, 0, " t type  v voice  + - humor  c camera  space play  left/right views  q quit ", cp(P_DIM))
+        put(win, H - 1, 0, " t type  v voice  o todo  + - humor  c camera  space play  left/right views  q quit ", cp(P_DIM))
         return
 
     # Cinematic sci-fi header band
@@ -3582,6 +3594,17 @@ def v_tars_dashboard(win, W, H):
     put(win, top + body_h - 4, left_x + 2, _clip(voice_line, left_w - 4), cp(P_MID))
     put(win, top + body_h - 3, left_x + 2, _clip(cam_line, left_w - 4), cp(P_MID))
     put(win, top + body_h - 2, left_x + 2, _clip(f"BOOT {DS.boot_status} // {DS.boot_note}", left_w - 4), cp(P_GREEN if DS.boot_status == "READY" else P_AMBER, bold=True))
+
+    todo_y = top + 14
+    if todo_y < top + body_h - 5:
+        put(win, todo_y, left_x + 2, "TODOS", cp(P_DIM))
+        todo_count = len(ST.todos)
+        todo_done = sum(1 for done, _ in ST.todos if done)
+        put(win, todo_y + 1, left_x + 2, f"{todo_done}/{todo_count} completed", cp(P_AMBER))
+        for i, item in enumerate(ST.todos[:3]):
+            done, title = item
+            mark = "✓" if done else "○"
+            put(win, todo_y + 2 + i, left_x + 2, _clip(f"{mark} {title}", left_w - 4), cp(P_DIM if done else P_HI))
 
     # Center: neural core and interaction
     core_face = denji_face(DS.mood)
@@ -3637,7 +3660,7 @@ def v_tars_dashboard(win, W, H):
 
     # Footer command rail
     put(win, H - 3, 0, "=" * (W - 1), cp(P_BOX))
-    rail = " t type | v voice | + - humor | c camera | space play | z/x track | left/right view | q quit "
+    rail = " t type | v voice | o todo | + - humor | c camera | space play | z/x track | left/right view | q quit "
     put(win, H - 2, max(0, (W - len(rail)) // 2), rail, cp(P_DIM))
     put(win, H - 1, max(0, (W - 40) // 2), "DENJI SYNTHETIC INTERFACE // LIVE", cp(P_CYAN, bold=True))
 
@@ -5651,6 +5674,10 @@ def handle_key(k):
             DS.input_mode = True
             if not DS.input_buf:
                 DS.input_buf = "Denji play music"
+            return
+        if v == 0 and k in (ord('o'), ord('O')):
+            ST.todo_add = True
+            ST.todo_buf = ""
             return
         if v == 0 and k in (ord('v'), ord('V')):
             denji_listen_once()
