@@ -71,6 +71,12 @@ try:
 except ImportError:
     HAS_VOICE_ENGINE = False
 
+try:
+    from denji_ai import get_ai_engine
+    HAS_AI_ENGINE = True
+except ImportError:
+    HAS_AI_ENGINE = False
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  COLOURS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3098,6 +3104,11 @@ class DenjiState:
         self.voice_timeout = 0.0
         self.boot_status = "BOOT"
         self.boot_note = "Starting systems"
+        # ─── AI Brain Fields ────────────────────────────────────────
+        self.ai_engine = get_ai_engine() if HAS_AI_ENGINE else None
+        self.ai_thinking = False
+        self.ai_last_input = ""
+        self.ai_last_output = ""
 
 
 _DENJI_BOOT_LOCK = threading.Lock()
@@ -3351,50 +3362,80 @@ def denji_submit_command(cmd):
     if HAS_PERSONALITY and DS.personality:
         personality_response = DS.personality.generate_acknowledgment(c)
 
+    command_handled = False
+    
     if "play" in c and "music" in c:
         if not AUDIO.playing:
             AUDIO.toggle_play()
         DS.response_text = personality_response or "Playing your music"
         DS.last_action = "Music playback started"
+        command_handled = True
     elif "pause" in c and "music" in c:
         if AUDIO.playing:
             AUDIO.toggle_play()
         DS.response_text = personality_response or "Pausing your music"
         DS.last_action = "Music playback paused"
+        command_handled = True
     elif "next" in c and ("track" in c or "song" in c or "music" in c):
         AUDIO.next_track()
         DS.response_text = personality_response or "Skipping to the next track"
         DS.last_action = "Advanced to next track"
+        command_handled = True
     elif "focus" in c:
         ST.pomo_run = True
         ST._pw = time.time()
         DS.response_text = personality_response or "Starting focus mode"
         DS.last_action = "Pomodoro session started"
+        command_handled = True
     elif "calendar" in c:
         ST.view = 5
         DS.response_text = personality_response or "Opening your calendar"
         DS.last_action = "Switched to calendar view"
+        command_handled = True
     elif "network" in c:
         ST.view = 4
         DS.response_text = personality_response or "Opening network overview"
         DS.last_action = "Switched to network view"
+        command_handled = True
     elif "video" in c:
         ST.view = 6
         DS.response_text = personality_response or "Opening video panel"
         DS.last_action = "Switched to video view"
+        command_handled = True
     elif "news" in c:
         ST.view = HUB_VIEW_IDX
         DS.response_text = personality_response or "Opening news and market hub"
         DS.last_action = "Switched to news hub"
+        command_handled = True
     elif "system" in c and "snapshot" in c:
         ST.view = 3
         DS.response_text = personality_response or "Opening system overview"
         DS.last_action = "Switched to neofetch view"
+        command_handled = True
+    
+    # If command not handled by system, route to AI engine
+    if not command_handled:
+        if HAS_AI_ENGINE and DS.ai_engine:
+            DS.ai_last_input = raw
+            DS.mood = "processing"
+            # Get AI response in background thread
+            def _ai_response_worker():
+                try:
+                    response = DS.ai_engine.get_response(raw, DS.mood, DS.humor_level)
+                    DS.ai_last_output = response
+                    DS.response_text = response
+                    DS.mood = "speaking"
+                    denji_speak(response)
+                except Exception as err:
+                    DS.response_text = f"Neural error: {str(err)[:40]}"
+                    DS.mood = "idle"
+            threading.Thread(target=_ai_response_worker, daemon=True).start()
+        else:
+            DS.response_text = personality_response or "I got that. Tell me what to run next."
+            DS.last_action = "Command understood, waiting for exact action"
+            denji_speak(DS.response_text)
     else:
-        DS.response_text = personality_response or "I got that. Tell me what to run next."
-        DS.last_action = "Command understood, waiting for exact action"
-
-    denji_speak(DS.response_text)
+        denji_speak(DS.response_text)
 
 
 def denji_tick():
@@ -3600,30 +3641,41 @@ def v_tars_dashboard(win, W, H):
     put(win, top + body_h - 3, left_x + 2, _clip(f"DOWN {kbfmt(net_dn)}  UP {kbfmt(net_up)}", left_w - 4), cp(P_CYAN))
     put(win, top + body_h - 2, left_x + 2, _clip(f"BOOT {DS.boot_status} // {DS.boot_note}", left_w - 4), cp(P_GREEN if DS.boot_status == "READY" else P_AMBER, bold=True))
 
-    # Center: neural core and interaction
+    # Center: neural core and AI interaction
     core_face = denji_face(DS.mood)
     centre(win, top + 2, core_face, cp(P_CYAN, bold=True))
     centre(win, top + 3, f"STATE :: {DS.mood.upper()}", cp(P_HI, bold=True))
-    centre(win, top + 4, f"ATTN VECTOR :: {DS.eye_x:+d},{DS.eye_y:+d}", cp(P_DIM))
+    centre(win, top + 4, "NEURAL CORE // AI BRAIN", cp(P_DIM))
 
     pulse = "|" * (1 + int((math.sin(time.time() * 4.0) + 1.0) * 6.0))
-    centre(win, top + 6, f"[{pulse:<13}]", cp(P_BLUE, bold=True))
+    centre(win, top + 5, f"[{pulse:<13}]", cp(P_BLUE, bold=True))
 
-    cmd_line = _clip(f"INPUT  > {DS.user_text}", center_w - 4)
-    rsp_line = _clip(f"OUTPUT > {DS.response_text}", center_w - 4)
-    put(win, top + 9, center_x + 2, cmd_line, cp(P_HI))
-    put(win, top + 10, center_x + 2, rsp_line, cp(P_GREEN))
-    put(win, top + 12, center_x + 2, _clip(f"LAST ACTION :: {DS.last_action}", center_w - 4), cp(P_MID))
-
+    # AI conversation display
+    centre(win, top + 7, "─" * max(5, center_w - 6), cp(P_BOX))
+    
+    if HAS_AI_ENGINE and DS.ai_engine:
+        conv_lines = DS.ai_engine.get_conversation_display(max_lines=min(5, max(3, body_h - top - 13)))
+        for i, line in enumerate(conv_lines):
+            y = top + 8 + i
+            if y < top + body_h - 4:
+                # Alternate colors for readability
+                is_user = line.startswith("YOU >")
+                color = P_HI if is_user else P_GREEN
+                put(win, y, center_x + 2, _clip(line, center_w - 4), cp(color))
+    
+    # Current input line
+    input_display = f"INPUT > {DS.user_text[:max(0,center_w-10)]}"
+    put(win, top + body_h - 3, center_x + 2, _clip(input_display, center_w - 4), cp(P_CYAN, bold=True))
+    
     if DS.mood == "speaking":
         spec = ST._spec_smooth[:max(8, center_w - 6)]
         bars = ""
         for v in spec:
             lvl = max(0, min(7, int(v * 8)))
             bars += "._-:=+*#"[lvl]
-        put(win, top + body_h - 3, center_x + 2, _clip(bars, center_w - 4), cp(P_PINK, bold=True))
+        put(win, top + body_h - 2, center_x + 2, _clip(bars, center_w - 4), cp(P_PINK, bold=True))
     else:
-        put(win, top + body_h - 3, center_x + 2, _clip("VOICE BUS // IDLE CARRIER", center_w - 4), cp(P_DIM))
+        put(win, top + body_h - 2, center_x + 2, _clip("PROCESSING // READY FOR INPUT", center_w - 4), cp(P_DIM))
 
     # Right: mission/news/track stack
     items = get_news_items()
@@ -7930,6 +7982,64 @@ def _in_text_input_mode():
     return False
 
 
+def _show_credits_splash(stdscr):
+    """Display OpenCode and project credits splash screen"""
+    stdscr.erase()
+    H, W = stdscr.getmaxyx()
+    
+    credits = [
+        "",
+        "╔════════════════════════════════════════════════════════════════╗",
+        "║          DENJI SYNTHETIC COMMAND INTERFACE v3.0                ║",
+        "║                    NEURAL CORE: AI BRAIN                       ║",
+        "╚════════════════════════════════════════════════════════════════╝",
+        "",
+        "POWERED BY OPENCODE AGENT ARCHITECTURE",
+        "",
+        "OpenCode Contributors:",
+        "  • @thdxr (Founder & Lead Developer)",
+        "  • @adamdotdevin (Core Architecture)",
+        "  • @rekram1-node (Infrastructure)",
+        "  • @iamdavidhill, @kitlangton, @jayair",
+        "  • @fwang, @Brendonovich, @Hona",
+        "  • +846 community contributors",
+        "",
+        "Denji AI Integration:",
+        "  • OpenCode foundation for agent patterns",
+        "  • Extended for terminal-based personality synthesis",
+        "  • Multi-modal I/O framework (typing, voice, camera)",
+        "",
+        "Credits & Acknowledgments:",
+        "  • TARS interface inspired by sci-fi HUD design",
+        "  • Speech synthesis: pyttsx3, SAPI, PowerShell",
+        "  • Computer vision: OpenCV",
+        "  • Terminal UI: curses (Python standard library)",
+        "",
+        "LICENSE: MIT (OpenCode) & Custom (Denji Integration)",
+        "",
+        "Press any key to continue to Denji Neural Core...",
+    ]
+    
+    y = max(0, (H - len(credits)) // 2)
+    for line in credits:
+        if y < H:
+            x = max(0, (W - len(line)) // 2)
+            put(stdscr, y, x, line[:W], cp(P_CYAN, bold=True) if "DENJI" in line else cp(P_HI) if "OpenCode" in line else cp(P_DIM))
+            y += 1
+    
+    stdscr.refresh()
+    
+    # Wait for key press with timeout
+    stdscr.timeout(100)
+    for _ in range(100):  # ~10 seconds max
+        k = stdscr.getch()
+        if k != -1:
+            break
+        time.sleep(0.05)
+    
+    stdscr.timeout(50)
+
+
 def main(stdscr):
     os.environ["ESCDELAY"] = "0"
 
@@ -7943,6 +8053,9 @@ def main(stdscr):
     # omitted — it floods getch() with motion events on every pixel move.
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
     curses.mouseinterval(0)
+
+    # Show credits splash on first launch
+    _show_credits_splash(stdscr)
 
     if not AUDIO._backend:
         AUDIO.playing = False
