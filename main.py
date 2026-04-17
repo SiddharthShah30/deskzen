@@ -3619,19 +3619,21 @@ def v_tars_dashboard(win, W, H):
     for i, line in enumerate(_wrap(track, right_text_w, limit=2)):
         put(win, top + 3 + i, right_x + 2, line, cp(P_PINK, bold=True))
     put(win, top + 5, right_x + 2, f"AUDIO {'LIVE' if AUDIO.playing else 'PAUSED'}", cp(P_GREEN if AUDIO.playing else P_AMBER, bold=True))
+    put(win, top + 6, right_x + 2, "─" * max(0, right_text_w), cp(P_BOX))
 
     put(win, top + 7, right_x + 2, "GLOBAL FEED", cp(P_DIM))
     feed_lines = _wrap(head_1, right_text_w, limit=2) + _wrap(head_2, right_text_w, limit=2)
     for i, line in enumerate(feed_lines[:4]):
         put(win, top + 8 + i, right_x + 2, line, cp(P_HI if i < 2 else P_MID))
+    put(win, top + 12, right_x + 2, "─" * max(0, right_text_w), cp(P_BOX))
 
-    put(win, top + 12, right_x + 2, "SUBSYSTEMS", cp(P_DIM))
+    put(win, top + 13, right_x + 2, "SUBSYSTEMS", cp(P_DIM))
     net_name = sd.get("ssid", "N/A")
     net_dn = sd.get("net_dn", 0.0)
     net_up = sd.get("net_up", 0.0)
-    put(win, top + 13, right_x + 2, _clip(f"NET {net_name}", right_text_w), cp(P_CYAN))
-    put(win, top + 14, right_x + 2, _clip(f"DOWN {kbfmt(net_dn)}   UP {kbfmt(net_up)}", right_text_w), cp(P_CYAN))
-    put(win, top + 15, right_x + 2, _clip(f"VIEW {ALL_VIEW_NAMES[ST.view] if 0 <= ST.view < len(ALL_VIEW_NAMES) else 'UNKNOWN'}", right_text_w), cp(P_BLUE))
+    put(win, top + 14, right_x + 2, _clip(f"NET {net_name}", right_text_w), cp(P_CYAN))
+    put(win, top + 15, right_x + 2, _clip(f"DOWN {kbfmt(net_dn)}   UP {kbfmt(net_up)}", right_text_w), cp(P_CYAN))
+    put(win, top + 16, right_x + 2, _clip(f"VIEW {ALL_VIEW_NAMES[ST.view] if 0 <= ST.view < len(ALL_VIEW_NAMES) else 'UNKNOWN'}", right_text_w), cp(P_BLUE))
 
     # Footer command rail
     put(win, H - 3, 0, "=" * (W - 1), cp(P_BOX))
