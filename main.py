@@ -3494,13 +3494,21 @@ def denji_submit_command(cmd):
     
     # If command not handled by system, route to AI engine
     if not command_handled:
-        if HAS_AI_ENGINE and DS.ai_engine:
+        # Force AI engine initialization (always try to use it)
+        try:
+            if not DS.ai_engine and HAS_AI_ENGINE:
+                DS.ai_engine = get_ai_engine()
+        except Exception:
+            pass
+        
+        # Use AI engine if available, otherwise use TARS fallback
+        if DS.ai_engine:
             DS.ai_last_input = raw
             DS.mood = "processing"
             try:
                 response = DS.ai_engine.get_response(raw, DS.mood, DS.humor_level)
                 DS.ai_last_output = response
-                backend = (DS.ai_engine.last_backend or "RULE").upper()
+                backend = (DS.ai_engine.last_backend or "TARS").upper()
                 DS.response_text = f"[{backend}] {response}"
                 DS.mood = "speaking"
                 denji_speak(DS.response_text)
@@ -3509,6 +3517,7 @@ def denji_submit_command(cmd):
                 DS.mood = "idle"
                 denji_speak(DS.response_text)
         else:
+            # Genuine fallback (should rarely happen)
             DS.response_text = _tars_reply("I got that. Tell me what to run next.", personality_response)
             DS.last_action = "Command understood, waiting for exact action"
             denji_speak(DS.response_text)
