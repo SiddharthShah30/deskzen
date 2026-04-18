@@ -20,11 +20,19 @@ except ImportError:
     HAS_REQUESTS = False
 
 
+def _opencode_cmd_prefix() -> list[str]:
+    """Return a platform-safe command prefix for invoking OpenCode CLI."""
+    if os.name == "nt":
+        # On Windows, OpenCode is often installed as a .cmd shim discoverable via cmd.
+        return ["cmd", "/c", "opencode"]
+    return ["opencode"]
+
+
 def _check_opencode_available() -> bool:
     """Check if OpenCode CLI is installed and available"""
     try:
         result = subprocess.run(
-            ["opencode", "--version"],
+            _opencode_cmd_prefix() + ["--version"],
             capture_output=True,
             timeout=2,
             text=True
@@ -43,7 +51,7 @@ def _read_opencode_help() -> str:
         return ""
     try:
         result = subprocess.run(
-            ["opencode", "--help"],
+            _opencode_cmd_prefix() + ["--help"],
             capture_output=True,
             timeout=3,
             text=True,
@@ -204,59 +212,47 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
     def _generate_with_opencode(self, user_input: str, mood: str, humor: float) -> Optional[str]:
         """Call OpenCode CLI as AI agent fallback"""
         try:
-            # Build the prompt with system context
-            full_prompt = f"""{self.system_prompt}
+            # Build a compact, TARS-style prompt that OpenCode can answer quickly.
+            full_prompt = (
+                "You are Denji Neural Core in a TARS-inspired style. "
+                f"Mood={mood}. Humor={int(humor)}%. "
+                "Reply in 1-3 concise lines, helpful and actionable. "
+                "If asked capabilities, mention coding help, file edits, terminal commands, and project understanding. "
+                f"User: {user_input}"
+            )
 
-Current Context:
-- User Input: {user_input}
-- Denji Mood: {mood}
-- Humor Level: {humor}%
+            cmd = _opencode_cmd_prefix() + ["run", full_prompt]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=20,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
 
-Respond as Denji's Neural Core in a single, concise line. Keep it professional yet personality-driven."""
-            
-            help_text = (self._opencode_help or "").lower()
-            attempts = []
-
-            # Probe common non-interactive command shapes.
-            if "--prompt" in help_text:
-                attempts.append(["opencode", "--prompt", full_prompt])
-            if "-p" in help_text or "--prompt" in help_text:
-                attempts.append(["opencode", "-p", full_prompt])
-            if " run" in help_text or "\nrun" in help_text:
-                attempts.append(["opencode", "run", full_prompt])
-                attempts.append(["opencode", "run", "--prompt", full_prompt])
-            if "chat" in help_text:
-                attempts.append(["opencode", "chat", full_prompt])
-
-            # Fallback generic attempts if help probing is inconclusive.
-            attempts.extend([
-                ["opencode", "run", full_prompt],
-                ["opencode", "--prompt", full_prompt],
-                ["opencode", "-p", full_prompt],
-            ])
-
-            for cmd in attempts:
-                try:
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        timeout=15,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                    )
-                except Exception:
-                    continue
-
-                output = (result.stdout or "").strip()
-                if result.returncode == 0 and output:
-                    response = output
-                    if response.startswith("```"):
-                        response = response.split("```", 1)[-1].strip()
-                    if response.endswith("```"):
-                        response = response.rsplit("```", 1)[0].strip()
+            output = (result.stdout or "").strip()
+            if result.returncode == 0 and output:
+                # Normalize OpenCode run output (strip heading lines like "> build · ...").
+                lines = [ln.rstrip() for ln in output.splitlines()]
+                cleaned: list[str] = []
+                for ln in lines:
+                    s = ln.strip()
+                    if not s:
+                        if cleaned:
+                            cleaned.append("")
+                        continue
+                    if s.startswith(">") and "·" in s:
+                        continue
+                    cleaned.append(s)
+                response = "\n".join(cleaned).strip()
+                if response.startswith("```"):
+                    response = response.split("```", 1)[-1].strip()
+                if response.endswith("```"):
+                    response = response.rsplit("```", 1)[0].strip()
+                if response:
                     self.last_backend = "OPENCODE"
-                    return response[:240]
+                    return response[:480]
             
             return None
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError, UnicodeError):
