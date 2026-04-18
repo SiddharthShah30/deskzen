@@ -1,9 +1,7 @@
 """
-Denji AI Brain - Integrated OpenCode Agent
-Powered by open-source AI technology with credits to:
-  • OpenCode (Anomaly Co) - Foundation for AI agent architecture
-  • Contributors: @thdxr, @adamdotdevin, @rekram1-node, and 860+ contributors
-  • Extended for Denji Terminal Standby System
+Denji AI Brain - Integrated LLM Agent
+Real-time AI responses using Groq API (free, ultra-fast inference)
+Fallback to local TARS personality system
 """
 
 import os
@@ -19,6 +17,12 @@ try:
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
+
+try:
+    from groq import Groq
+    HAS_GROQ = True
+except ImportError:
+    HAS_GROQ = False
 
 
 def _opencode_cmd_prefix() -> list[str]:
@@ -68,11 +72,12 @@ def _read_opencode_help() -> str:
 class DenjiAI:
     """
     Denji AI Brain for terminal-based conversation and understanding.
-    Integrates with Denji's personality system and understands the codebase.
+    Integrates with Groq LLM API for real-time, intelligent responses.
+    Falls back to TARS personality system if API is unavailable.
     """
     
     def __init__(self):
-        """Initialize the AI brain with system knowledge"""
+        """Initialize the AI brain with Groq client and system knowledge"""
         self.conversation_history = []
         self.max_history = 20
         self.system_prompt = self._build_system_prompt()
@@ -81,8 +86,18 @@ class DenjiAI:
         self._lock = threading.Lock()
         self.last_response = ""
         self.response_time = 0.0
-        self._opencode_help = _read_opencode_help()
-        self.last_backend = "RULE"
+        self.last_backend = "TARS"
+        
+        # Initialize Groq client if API key is available
+        self.groq_client = None
+        self.groq_api_key = os.getenv("GROQ_API_KEY")
+        if HAS_GROQ and self.groq_api_key:
+            try:
+                self.groq_client = Groq(api_key=self.groq_api_key)
+                self.last_backend = "GROQ"
+            except Exception as e:
+                print(f"[Denji] Groq initialization failed: {e}")
+                self.groq_client = None
 
     def _ollama_available(self) -> bool:
         """Quick health probe for local Ollama service."""
@@ -96,9 +111,8 @@ class DenjiAI:
 
     def get_backend_status(self) -> str:
         """Return current backend status for dashboard display."""
-        ollama = "UP" if self._ollama_available() else "DOWN"
-        opencode = "ON" if HAS_OPENCODE else "OFF"
-        return f"AI {self.last_backend} | OLLAMA {ollama} | OPENCODE {opencode}"
+        groq_status = "ON" if (HAS_GROQ and self.groq_client and self.groq_api_key) else "OFF"
+        return f"AI {self.last_backend} | GROQ {groq_status} | FALLBACK TARS"
         
     def _build_system_prompt(self) -> str:
         """Build the system prompt with Denji codebase knowledge"""
@@ -192,14 +206,66 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
     
     def _generate_response_local(self, user_input: str, mood: str, humor: float) -> Optional[str]:
         """
-        TARS personality is the primary response engine—fast, reliable, offline.
-        Ollama and OpenCode are optional extras (not the main path).
+        PRIMARY PATH: Try Groq LLM API first (real-time, intelligent responses)
+        FALLBACK: Use TARS personality system if Groq unavailable
         """
-        # PRIMARY: Use TARS personality rule-based system (always works, no dependencies)
-        # This is now the main engine, not a fallback.
+        # Try Groq API first if available
+        if self.groq_client:
+            try:
+                response = self._generate_with_groq(user_input, mood, humor)
+                if response:
+                    self.last_backend = "GROQ"
+                    return response
+            except Exception as err:
+                print(f"[Denji] Groq API error: {err}")
+                # Fall through to TARS
+        
+        # Fallback: Use TARS personality system (always works, offline)
         self.last_backend = "TARS"
-        response = self._fallback_response(user_input, mood, humor)
-        return response if response else None
+        return self._fallback_response(user_input, mood, humor)
+    
+    def _generate_with_groq(self, user_input: str, mood: str, humor: float) -> Optional[str]:
+        """Call Groq API for intelligent LLM responses"""
+        if not self.groq_client:
+            return None
+        
+        try:
+            # Build a system prompt that emphasizes TARS personality
+            system_prompt = f"""You are Denji Neural Core - an AI assistant with a TARS-inspired dry, witty personality.
+
+RESPONSE STYLE:
+- Be concise and punchy (1-3 sentences typical)
+- Use dry wit and humor level {int(humor)}%
+- Never sound like a generic assistant
+- If humor is high (>70), be more sarcastic and witty
+- If humor is low (<35), be professional but still helpful
+- Acknowledge the user's mood context: {mood}
+
+DENJI SYSTEM KNOWLEDGE:
+- Framework: Python curses TUI with personality engine
+- Features: Voice (v), Camera (c), Todo (o), Music (space), Humor (+/-), Views (left/right)
+- Dashboard: 3-panel HUD with telemetry, neural core, and tasks
+- Personality: TARS-inspired sci-fi synthetic assistant
+
+Be helpful, knowledgeable, and perfectly aligned with this personality."""
+            
+            completion = self.groq_client.chat.completions.create(
+                model="mixtral-8x7b-32768",  # Fast, intelligent Groq model
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_input}
+                ],
+                temperature=0.7,
+                max_tokens=256,
+                timeout=8.0
+            )
+            
+            response = completion.choices[0].message.content.strip()
+            return response if response else None
+            
+        except Exception as err:
+            print(f"[Denji] Groq generation failed: {err}")
+            return None
     
     def _generate_with_opencode(self, user_input: str, mood: str, humor: float) -> Optional[str]:
         """Call OpenCode CLI as AI agent fallback"""
