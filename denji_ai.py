@@ -124,6 +124,13 @@ DENJI FEATURES YOU CAN DISCUSS:
 - Voice Integration: Multi-fallback audio chain (sounddevice → SpeechRecognition → SAPI/PowerShell)
 - Camera: Windows DirectShow backend with face detection and eye tracking
 
+TARS RESPONSE RULES:
+- Speak like TARS: dry, witty, concise, helpful, and slightly sarcastic when humor is high.
+- When the user greets you, respond with a TARS-style greeting plus what you can do.
+- Never answer like a generic help bot.
+- If the user asks "what can you do", describe Denji capabilities with personality.
+- Prefer short, punchy replies over long assistant-style paragraphs.
+
 YOUR ROLE:
 - Understand user commands about the Denji system
 - Provide helpful guidance on how to use Denji features
@@ -224,10 +231,11 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
         try:
             # Build a compact, TARS-style prompt that OpenCode can answer quickly.
             full_prompt = (
-                "You are Denji Neural Core in a TARS-inspired style. "
+                "You are Denji Neural Core. Respond in a TARS style: dry, witty, concise, and helpful. "
                 f"Mood={mood}. Humor={int(humor)}%. "
-                "Reply in 1-3 concise lines, helpful and actionable. "
-                "If asked capabilities, mention coding help, file edits, terminal commands, and project understanding. "
+                "Do not sound like a generic support bot. "
+                "For greetings, give a witty greeting plus what Denji can do. "
+                "For capability questions, answer with personality and mention coding help, file edits, terminal commands, project understanding, voice, camera, todo, and dashboard control. "
                 f"User: {user_input}"
             )
 
@@ -269,7 +277,7 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
                     response = response.rsplit("```", 1)[0].strip()
                 if response:
                     self.last_backend = "OPENCODE"
-                    return response[:480]
+                    return self._tars_wrap_response(response[:480], humor)
 
                 # If OpenCode is available but failed, surface a concise diagnostic.
                 if output:
@@ -283,6 +291,36 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
             return None
         except Exception:
             return None
+
+    def _tars_wrap_response(self, response: str, humor: float) -> str:
+        """Lightly adapt OpenCode output so it reads like TARS without replacing the substance."""
+        text = (response or "").strip()
+        if not text:
+            return text
+
+        prefixes = [
+            "Affirmative. ",
+            "Understood. ",
+            "Processing. ",
+            "TARS online. ",
+        ]
+        witty_prefixes = [
+            "Certainly, because apparently I'm the responsible one. ",
+            "Of course. I live for this sort of thing. ",
+            "Naturally. Try not to break anything. ",
+            "Fine. I’ll be useful, then. ",
+        ]
+
+        if humor >= 70:
+            prefix = random.choice(witty_prefixes)
+        elif humor >= 35:
+            prefix = random.choice(prefixes)
+        else:
+            prefix = ""
+
+        if text.startswith(("Affirmative", "Understood", "Processing", "TARS")):
+            return text
+        return f"{prefix}{text}" if prefix else text
     
     def _fallback_response(self, user_input: str, mood: str, humor: float) -> str:
         """Rule-based fallback responses with Denji personality"""
