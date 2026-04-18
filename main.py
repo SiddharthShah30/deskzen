@@ -3131,7 +3131,11 @@ def denji_startup_boot():
                 DS.personality = get_personality_engine(DS.humor_level)
 
             if HAS_AI_ENGINE:
-                _refresh_ai_engine()
+                try:
+                    ai_module = importlib.import_module("denji_ai")
+                    DS.ai_engine = ai_module.get_ai_engine()
+                except Exception:
+                    _refresh_ai_engine()
 
             DS.boot_note = "Warming voice channels"
             if HAS_VOICE_ENGINE and DS.voice_enabled and DS.voice_engine is None:
@@ -3206,7 +3210,6 @@ def _refresh_ai_engine():
         return None
     try:
         fresh_module = importlib.import_module("denji_ai")
-        fresh_module = importlib.reload(fresh_module)
         DS.ai_engine = fresh_module.get_ai_engine()
     except Exception:
         try:
@@ -3403,7 +3406,11 @@ def denji_submit_command(cmd):
     DS.stage_queue = [("processing", 0.85), ("speaking", 1.4), ("idle", 0.0)]
 
     if HAS_AI_ENGINE:
-        _refresh_ai_engine()
+        try:
+            ai_module = importlib.import_module("denji_ai")
+            DS.ai_engine = ai_module.get_ai_engine()
+        except Exception:
+            _refresh_ai_engine()
 
     # Get personality response based on humor level
     personality_response = ""
