@@ -3073,14 +3073,15 @@ class DenjiState:
     def __init__(self):
         self.input_mode = False
         self.input_buf = ""
-        self.user_text = "Denji play music"
-        self.response_text = "Playing your music"
+        self.user_text = ""
+        self.response_text = "Ready for your command."
         self.mood = "idle"          # idle | listening | processing | speaking | happy | sad
         self.mood_until = 0.0
         self.stage_queue = []
         self.last_action = "Waiting for your command"
         self.mic_status = "Ready" if HAS_SR else "Offline"
         self.tts_status = "Ready" if HAS_TTS else "Offline"
+        self.speech_output_enabled = True
         self.camera_enabled = False
         self.camera_status = "Ready" if HAS_CV2 else "Offline"
         self.face_seen = False
@@ -3129,6 +3130,9 @@ def denji_startup_boot():
             if HAS_PERSONALITY and DS.personality is None:
                 DS.personality = get_personality_engine(DS.humor_level)
 
+            if HAS_AI_ENGINE:
+                _refresh_ai_engine()
+
             DS.boot_note = "Warming voice channels"
             if HAS_VOICE_ENGINE and DS.voice_enabled and DS.voice_engine is None:
                 try:
@@ -3171,6 +3175,9 @@ def _denji_speak_worker(text):
 
 
 def denji_speak(text):
+    if not DS.speech_output_enabled:
+        DS.tts_status = "Muted"
+        return
     if DS.voice_engine is not None:
         try:
             DS.voice_engine.speak(text, wait=False)
@@ -3191,6 +3198,33 @@ def _tars_reply(core_text: str, personality_response: str = "") -> str:
     if not core:
         return flair
     return f"{flair} {core}"
+
+
+def _refresh_ai_engine():
+    """Reload the AI module so the live process sees the current backend state."""
+    if not HAS_AI_ENGINE:
+        return None
+    try:
+        fresh_module = importlib.import_module("denji_ai")
+        fresh_module = importlib.reload(fresh_module)
+        DS.ai_engine = fresh_module.get_ai_engine()
+    except Exception:
+        try:
+            DS.ai_engine = get_ai_engine()
+        except Exception:
+            pass
+    return DS.ai_engine
+
+
+def denji_toggle_speech_output():
+    """Toggle spoken output while keeping text replies active."""
+    DS.speech_output_enabled = not DS.speech_output_enabled
+    if DS.speech_output_enabled:
+        DS.tts_status = "Ready" if HAS_TTS else "Offline"
+        DS.last_action = "Speech output enabled"
+    else:
+        DS.tts_status = "Muted"
+        DS.last_action = "Speech output muted"
 
 
 def _denji_camera_loop():
@@ -3368,6 +3402,9 @@ def denji_submit_command(cmd):
     DS.mood_until = time.time() + 0.55
     DS.stage_queue = [("processing", 0.85), ("speaking", 1.4), ("idle", 0.0)]
 
+    if HAS_AI_ENGINE:
+        _refresh_ai_engine()
+
     # Get personality response based on humor level
     personality_response = ""
     if HAS_PERSONALITY and DS.personality:
@@ -3429,20 +3466,17 @@ def denji_submit_command(cmd):
         if HAS_AI_ENGINE and DS.ai_engine:
             DS.ai_last_input = raw
             DS.mood = "processing"
-            # Get AI response in background thread
-            def _ai_response_worker():
-                try:
-                    response = DS.ai_engine.get_response(raw, DS.mood, DS.humor_level)
-                    DS.ai_last_output = response
-                    backend = (DS.ai_engine.last_backend or "RULE").upper()
-                    DS.response_text = f"[{backend}] {response}"
-                    DS.mood = "speaking"
-                    denji_speak(DS.response_text)
-                except Exception as err:
-                    DS.response_text = f"Neural error: {str(err)[:40]}"
-                    DS.mood = "idle"
-                    denji_speak(DS.response_text)
-            threading.Thread(target=_ai_response_worker, daemon=True).start()
+            try:
+                response = DS.ai_engine.get_response(raw, DS.mood, DS.humor_level)
+                DS.ai_last_output = response
+                backend = (DS.ai_engine.last_backend or "RULE").upper()
+                DS.response_text = f"[{backend}] {response}"
+                DS.mood = "speaking"
+                denji_speak(DS.response_text)
+            except Exception as err:
+                DS.response_text = f"Neural error: {str(err)[:40]}"
+                DS.mood = "idle"
+                denji_speak(DS.response_text)
         else:
             DS.response_text = _tars_reply("I got that. Tell me what to run next.", personality_response)
             DS.last_action = "Command understood, waiting for exact action"
@@ -3596,11 +3630,12 @@ def v_tars_dashboard(win, W, H):
         centre(win, 5, f"STATE {DS.mood.upper()}  |  BOOT {DS.boot_status}", cp(P_MID, bold=True))
         if HAS_AI_ENGINE and DS.ai_engine:
             centre(win, 6, _clip(DS.ai_engine.get_backend_status(), W - 6), cp(P_BLUE))
+        blink = "_" if int(time.time() * 2) % 2 == 0 else " "
         if DS.input_mode:
-            centre(win, 7, _clip(f"COMMAND > {DS.input_buf}_", W - 6), cp(P_CYAN, bold=True))
+            centre(win, 7, _clip(f"COMMAND > {DS.input_buf}{blink}", W - 6), cp(P_CYAN, bold=True))
             centre(win, 8, "ENTER submit  ESC cancel", cp(P_DIM))
         elif ST.todo_add:
-            centre(win, 7, _clip(f"NEW TODO > {ST.todo_buf}_", W - 6), cp(P_AMBER, bold=True))
+            centre(win, 7, _clip(f"NEW TODO > {ST.todo_buf}{blink}", W - 6), cp(P_AMBER, bold=True))
             centre(win, 8, "ENTER add  ESC cancel", cp(P_DIM))
         else:
             centre(win, 7, _clip(f"INPUT  {DS.user_text}", W - 6), cp(P_HI))
@@ -3615,7 +3650,7 @@ def v_tars_dashboard(win, W, H):
             centre(win, 14, _clip(f"1. {first_todo}", W - 6), cp(P_DIM))
         voice_label = "VOICE LISTENING" if DS.listening else "VOICE READY" if DS.voice_enabled else "VOICE OFFLINE"
         centre(win, H - 3, voice_label, cp(P_CYAN if DS.voice_enabled else P_DIM, bold=True))
-        put(win, H - 1, 0, " type any key/t  v voice  o todo  + - humor  c camera  left/right views  esc cancel  q quit ", cp(P_DIM))
+        put(win, H - 1, 0, " type any key/t  v voice  m mute  o todo  + - humor  c camera  left/right views  esc cancel  q quit ", cp(P_DIM))
         return
 
     # Cinematic sci-fi header band
@@ -3692,12 +3727,14 @@ def v_tars_dashboard(win, W, H):
     
     # Current input/composer line
     if DS.input_mode:
-        composer = f"COMMAND > {DS.input_buf}_"
+        blink = "_" if int(time.time() * 2) % 2 == 0 else " "
+        composer = f"COMMAND > {DS.input_buf}{blink}"
         hint = "ENTER submit  ESC cancel"
         put(win, top + body_h - 3, center_x + 2, _clip(composer, center_w - 4), cp(P_CYAN, bold=True))
         put(win, top + body_h - 2, center_x + 2, _clip(hint, center_w - 4), cp(P_DIM))
     elif ST.todo_add:
-        composer = f"NEW TODO > {ST.todo_buf}_"
+        blink = "_" if int(time.time() * 2) % 2 == 0 else " "
+        composer = f"NEW TODO > {ST.todo_buf}{blink}"
         hint = "ENTER add  ESC cancel"
         put(win, top + body_h - 3, center_x + 2, _clip(composer, center_w - 4), cp(P_AMBER, bold=True))
         put(win, top + body_h - 2, center_x + 2, _clip(hint, center_w - 4), cp(P_DIM))
@@ -3746,7 +3783,7 @@ def v_tars_dashboard(win, W, H):
 
     # Footer command rail
     put(win, H - 3, 0, "=" * (W - 1), cp(P_BOX))
-    rail = " type any key/t | v voice | o todo | + - humor | c camera | z/x track | left/right view | esc cancel | q quit "
+    rail = " type any key/t | v voice | m mute | o todo | + - humor | c camera | z/x track | left/right view | esc cancel | q quit "
     put(win, H - 2, max(0, (W - len(rail)) // 2), rail, cp(P_DIM))
     put(win, H - 1, max(0, (W - 40) // 2), "DENJI SYNTHETIC INTERFACE // LIVE", cp(P_CYAN, bold=True))
 
@@ -5748,7 +5785,7 @@ def handle_key(k):
         # Home view direct typing: start command mode on printable key without requiring 't'.
         reserved_home_keys = {
             ord('q'), ord('Q'), ord('t'), ord('T'), ord('/'), ord('v'), ord('V'),
-            ord('o'), ord('O'), ord('c'), ord('C'), ord('+'), ord('='), ord('-'),
+            ord('o'), ord('O'), ord('c'), ord('C'), ord('m'), ord('M'), ord('+'), ord('='), ord('-'),
             ord('_'), ord('z'), ord('Z'), ord('x'), ord('X'), ord(' '), ord('h'),
             ord('H'), ord('l'), ord('L'), ord('1'), ord('2'), ord('3'), ord('4'),
             ord('5'), ord('6')
@@ -5779,6 +5816,9 @@ def handle_key(k):
             return
         if v == 0 and k in (ord('v'), ord('V')):
             denji_listen_once()
+            return
+        if v == 0 and k in (ord('m'), ord('M')):
+            denji_toggle_speech_output()
             return
         if v == 0 and k in (ord('+'), ord('=')):
             DS.humor_level = min(100, DS.humor_level + 5)

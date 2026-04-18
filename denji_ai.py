@@ -35,7 +35,7 @@ def _check_opencode_available() -> bool:
         result = subprocess.run(
             _opencode_cmd_prefix() + ["--version"],
             capture_output=True,
-            timeout=2,
+            timeout=8,
             text=True
         )
         return result.returncode == 0
@@ -54,7 +54,7 @@ def _read_opencode_help() -> str:
         result = subprocess.run(
             _opencode_cmd_prefix() + ["--help"],
             capture_output=True,
-            timeout=3,
+            timeout=8,
             text=True,
             encoding="utf-8",
             errors="replace",
