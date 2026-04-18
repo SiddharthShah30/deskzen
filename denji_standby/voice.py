@@ -245,7 +245,7 @@ class VoiceEngine:
                         self.last_recognized_text = text
                         self.sr_status = "Ready"
                         return text
-                    except sr.UnknownAudioException:
+                    except sr.UnknownValueError:
                         self.sr_status = "Ready"
                         return ""
                     except sr.RequestError as e:

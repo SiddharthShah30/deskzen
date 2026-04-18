@@ -3182,6 +3182,17 @@ def denji_speak(text):
     threading.Thread(target=lambda t=text: _denji_speak_worker(t), daemon=True).start()
 
 
+def _tars_reply(core_text: str, personality_response: str = "") -> str:
+    """Blend informative text with personality tone so text and speech stay aligned."""
+    core = (core_text or "").strip()
+    flair = (personality_response or "").strip()
+    if not flair:
+        return core
+    if not core:
+        return flair
+    return f"{flair} {core}"
+
+
 def _denji_camera_loop():
     if not HAS_CV2:
         DS.camera_status = "Offline"
@@ -3367,49 +3378,49 @@ def denji_submit_command(cmd):
     if "play" in c and "music" in c:
         if not AUDIO.playing:
             AUDIO.toggle_play()
-        DS.response_text = personality_response or "Playing your music"
+        DS.response_text = _tars_reply("Playing your music", personality_response)
         DS.last_action = "Music playback started"
         command_handled = True
     elif "pause" in c and "music" in c:
         if AUDIO.playing:
             AUDIO.toggle_play()
-        DS.response_text = personality_response or "Pausing your music"
+        DS.response_text = _tars_reply("Pausing your music", personality_response)
         DS.last_action = "Music playback paused"
         command_handled = True
     elif "next" in c and ("track" in c or "song" in c or "music" in c):
         AUDIO.next_track()
-        DS.response_text = personality_response or "Skipping to the next track"
+        DS.response_text = _tars_reply("Skipping to the next track", personality_response)
         DS.last_action = "Advanced to next track"
         command_handled = True
     elif "focus" in c:
         ST.pomo_run = True
         ST._pw = time.time()
-        DS.response_text = personality_response or "Starting focus mode"
+        DS.response_text = _tars_reply("Starting focus mode", personality_response)
         DS.last_action = "Pomodoro session started"
         command_handled = True
     elif "calendar" in c:
         ST.view = 5
-        DS.response_text = personality_response or "Opening your calendar"
+        DS.response_text = _tars_reply("Opening your calendar", personality_response)
         DS.last_action = "Switched to calendar view"
         command_handled = True
     elif "network" in c:
         ST.view = 4
-        DS.response_text = personality_response or "Opening network overview"
+        DS.response_text = _tars_reply("Opening network overview", personality_response)
         DS.last_action = "Switched to network view"
         command_handled = True
     elif "video" in c:
         ST.view = 6
-        DS.response_text = personality_response or "Opening video panel"
+        DS.response_text = _tars_reply("Opening video panel", personality_response)
         DS.last_action = "Switched to video view"
         command_handled = True
     elif "news" in c:
         ST.view = HUB_VIEW_IDX
-        DS.response_text = personality_response or "Opening news and market hub"
+        DS.response_text = _tars_reply("Opening news and market hub", personality_response)
         DS.last_action = "Switched to news hub"
         command_handled = True
     elif "system" in c and "snapshot" in c:
         ST.view = 3
-        DS.response_text = personality_response or "Opening system overview"
+        DS.response_text = _tars_reply("Opening system overview", personality_response)
         DS.last_action = "Switched to neofetch view"
         command_handled = True
     
@@ -3429,9 +3440,10 @@ def denji_submit_command(cmd):
                 except Exception as err:
                     DS.response_text = f"Neural error: {str(err)[:40]}"
                     DS.mood = "idle"
+                    denji_speak(DS.response_text)
             threading.Thread(target=_ai_response_worker, daemon=True).start()
         else:
-            DS.response_text = personality_response or "I got that. Tell me what to run next."
+            DS.response_text = _tars_reply("I got that. Tell me what to run next.", personality_response)
             DS.last_action = "Command understood, waiting for exact action"
             denji_speak(DS.response_text)
     else:
@@ -5574,7 +5586,7 @@ def handle_key(k):
     # This prevents shortcuts from interfering with text input
     input_mode_active = (DS.input_mode or ST.todo_add or 
                          (v == 5 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode)) or 
-                         (v in (1, 5) and LS.mode in ("add_url", "add_file")) or 
+                         (v == 1 and LS.mode in ("add_url", "add_file")) or 
                          (v == 6 and VS.mode in ("add_url", "add_file")) or
                          (v == 8 and NSS.stock_input) or
                          (v == 9 and ECS.input_mode))
@@ -5607,11 +5619,11 @@ def handle_key(k):
             ST.todo_buf = _text_input(ST.todo_buf, k)
         return
 
-    if v == 6 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode):
+    if v == 5 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode):
         _handle_cal_input(k)
         return
 
-    if v in (1, 5) and LS.mode in ("add_url", "add_file"):
+    if v == 1 and LS.mode in ("add_url", "add_file"):
         if k in (10, 13):
             t = LS.buf.strip()
             if t:
@@ -5627,7 +5639,7 @@ def handle_key(k):
             LS.buf = _text_input(LS.buf, k)
         return
 
-    if v == 7 and VS.mode in ("add_url", "add_file"):
+    if v == 6 and VS.mode in ("add_url", "add_file"):
         if k in (10, 13):
             src = VS.buf.strip()
             if src:
@@ -5779,7 +5791,7 @@ def handle_key(k):
                 ST.pomo_secs  = ST.pomo_total; ST._pw = time.time()
             elif k == ord('f'): ST.focus_idx = (ST.focus_idx+1) % len(ST.focus_modes)
 
-        elif v in (1, 5):
+        elif v == 1:
             if LS.mode == "browse":
                 idxs = _lib_filtered_indices()
                 if k == ord('1'):
@@ -7975,7 +7987,7 @@ def _in_text_input_mode():
     if v == 0 and DS.input_mode:                                 return True
     if ST.todo_add:                                              return True
     if v == 5 and (CS.add_mode or CS.ics_mode or CS.del_mode or CS.ics_sel_mode):  return True
-    if v in (1, 5) and LS.mode in ("add_url", "add_file"):       return True
+    if v == 1 and LS.mode in ("add_url", "add_file"):             return True
     if v == 6 and VS.mode in ("add_url", "add_file"):            return True
     if v == 8 and NSS.stock_input:                               return True
     if v == 9 and ECS.input_mode:                                return True
@@ -8053,6 +8065,9 @@ def main(stdscr):
     # omitted — it floods getch() with motion events on every pixel move.
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
     curses.mouseinterval(0)
+
+    # Warm subsystems once at startup without blocking UI launch.
+    threading.Thread(target=denji_startup_boot, daemon=True).start()
 
     # Show credits splash on first launch
     _show_credits_splash(stdscr)

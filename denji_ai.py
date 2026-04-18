@@ -37,6 +37,24 @@ def _check_opencode_available() -> bool:
 HAS_OPENCODE = _check_opencode_available()
 
 
+def _read_opencode_help() -> str:
+    """Best-effort read of OpenCode CLI help text for capability probing."""
+    if not HAS_OPENCODE:
+        return ""
+    try:
+        result = subprocess.run(
+            ["opencode", "--help"],
+            capture_output=True,
+            timeout=3,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return (result.stdout or "") + "\n" + (result.stderr or "")
+    except Exception:
+        return ""
+
+
 
 class DenjiAI:
     """
@@ -54,6 +72,7 @@ class DenjiAI:
         self._lock = threading.Lock()
         self.last_response = ""
         self.response_time = 0.0
+        self._opencode_help = _read_opencode_help()
         
     def _build_system_prompt(self) -> str:
         """Build the system prompt with Denji codebase knowledge"""
@@ -176,25 +195,48 @@ Current Context:
 
 Respond as Denji's Neural Core in a single, concise line. Keep it professional yet personality-driven."""
             
-            # Call OpenCode via CLI
-            result = subprocess.run(
-                ["opencode", "-m", full_prompt],
-                capture_output=True,
-                timeout=10,
-                text=True,
-                encoding="utf-8",
-                errors="replace"
-            )
-            
-            if result.returncode == 0 and result.stdout:
-                response = result.stdout.strip()
-                if response:
-                    # Clean up response - remove any markdown code blocks
+            help_text = (self._opencode_help or "").lower()
+            attempts = []
+
+            # Probe common non-interactive command shapes.
+            if "--prompt" in help_text:
+                attempts.append(["opencode", "--prompt", full_prompt])
+            if "-p" in help_text or "--prompt" in help_text:
+                attempts.append(["opencode", "-p", full_prompt])
+            if " run" in help_text or "\nrun" in help_text:
+                attempts.append(["opencode", "run", full_prompt])
+                attempts.append(["opencode", "run", "--prompt", full_prompt])
+            if "chat" in help_text:
+                attempts.append(["opencode", "chat", full_prompt])
+
+            # Fallback generic attempts if help probing is inconclusive.
+            attempts.extend([
+                ["opencode", "run", full_prompt],
+                ["opencode", "--prompt", full_prompt],
+                ["opencode", "-p", full_prompt],
+            ])
+
+            for cmd in attempts:
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        timeout=15,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except Exception:
+                    continue
+
+                output = (result.stdout or "").strip()
+                if result.returncode == 0 and output:
+                    response = output
                     if response.startswith("```"):
-                        response = response.split("```")[1].strip()
+                        response = response.split("```", 1)[-1].strip()
                     if response.endswith("```"):
                         response = response.rsplit("```", 1)[0].strip()
-                    return response[:200]  # Limit to 200 chars for terminal display
+                    return response[:240]
             
             return None
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError, UnicodeError):
