@@ -163,68 +163,43 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
     
     def get_response(self, user_input: str, personality_mood: str = "idle", humor_level: float = 50.0) -> str:
         """
-        Get AI response to user input.
-        For now, returns a mock response (local processing).
-        Later, can integrate with actual LLM API.
+        Get AI response using TARS personality engine.
+        Fast, reliable, and personality-driven.
         """
         self.thinking = True
         self.add_message("user", user_input)
         
-        # Build context with current mood
-        mood_context = f"\n[Current Denji mood: {personality_mood} | Humor level: {humor_level}%]"
+        try:
+            # Use TARS rule-based personality system (primary engine)
+            response = self._generate_response_local(user_input, personality_mood, humor_level)
+            
+            if not response:
+                # Should never happen with new TARS system, but just in case
+                response = "Neural processing momentary hiccup. Try again?"
+            
+            self.thinking = False
+            self.add_message("assistant", response, backend=self.last_backend)
+            self.last_response = response
+            self.response_time = time.time()
+            return response
         
-        # Try to use an open API if available (Ollama local, or Hugging Face)
-        response = self._generate_response_local(user_input, personality_mood, humor_level)
-        
-        if not response:
-            # If OpenCode is installed but temporarily failed, keep backend explicit
-            # and avoid repeating canned greetings that feel hardcoded.
-            if HAS_OPENCODE:
-                self.last_backend = "OPENCODE"
-                response = "OpenCode is online but did not return in time. Ask again in 1-2 seconds."
-            else:
-                # Fallback: Simple rule-based responses
-                self.last_backend = "RULE"
-                response = self._fallback_response(user_input, personality_mood, humor_level)
-        
-        self.thinking = False
-        self.add_message("assistant", response, backend=self.last_backend)
-        self.last_response = response
-        self.response_time = time.time()
-        
-        return response
+        except Exception as err:
+            self.thinking = False
+            fallback = f"System error: {str(err)[:30]}"
+            self.add_message("assistant", fallback, backend="ERROR")
+            self.last_response = fallback
+            return fallback
     
     def _generate_response_local(self, user_input: str, mood: str, humor: float) -> Optional[str]:
-        """Try to use local/open LLM (Ollama first, then OpenCode CLI)"""
-        
-        # Try Ollama local inference first
-        if HAS_REQUESTS:
-            try:
-                response = requests.post(
-                    "http://localhost:11434/api/generate",
-                    json={
-                        "model": "neural-chat",  # Fast local model
-                        "prompt": f"{self.system_prompt}\n\nUser: {user_input}\n\nDenji (mood={mood}, humor={humor}%):",
-                        "stream": False,
-                        "temperature": 0.7
-                    },
-                    timeout=5
-                )
-                if response.status_code == 200:
-                    result = response.json()
-                    resp_text = result.get("response", "").strip()
-                    if resp_text:
-                        self.last_backend = "OLLAMA"
-                        return resp_text
-            except Exception:
-                pass
-        
-        # Fallback: Try OpenCode CLI agent
-        if HAS_OPENCODE:
-            return self._generate_with_opencode(user_input, mood, humor)
-        
-        # Final fallback: return None to trigger rule-based response
-        return None
+        """
+        TARS personality is the primary response engine—fast, reliable, offline.
+        Ollama and OpenCode are optional extras (not the main path).
+        """
+        # PRIMARY: Use TARS personality rule-based system (always works, no dependencies)
+        # This is now the main engine, not a fallback.
+        self.last_backend = "TARS"
+        response = self._fallback_response(user_input, mood, humor)
+        return response if response else None
     
     def _generate_with_opencode(self, user_input: str, mood: str, humor: float) -> Optional[str]:
         """Call OpenCode CLI as AI agent fallback"""
@@ -323,67 +298,205 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
         return f"{prefix}{text}" if prefix else text
     
     def _fallback_response(self, user_input: str, mood: str, humor: float) -> str:
-        """Rule-based fallback responses with Denji personality"""
-        user_lower = user_input.lower()
+        """
+        TARS-personality response engine.
+        Generates witty, dry, concise responses aligned with TARS character.
+        This is the primary response generator - no external API needed.
+        """
+        user_lower = user_input.lower().strip()
         
-        # Knowledge about the codebase
-        if any(x in user_lower for x in ["how", "explain", "tell me", "what is"]):
-            if "voice" in user_lower:
-                return "Voice system uses multi-fallback chain: sounddevice → SpeechRecognition → SAPI/PowerShell. Currently Ready for input via 'v' key."
-            elif "camera" in user_lower:
-                return "Camera integrates OpenCV with Windows DirectShow backend. Uses face detection to track attention. Press 'c' to toggle."
-            elif "todo" in user_lower:
-                return "Todo system stores persistent tasks. Press 'o' to create new tasks, manage them from the right panel."
-            elif "mood" in user_lower or "emotion" in user_lower:
-                return f"Currently in {mood} state. Mood system responds to your interactions. Adjust humor with +/- keys."
-            elif "dashboard" in user_lower or "tars" in user_lower:
-                return "Dashboard shows 3 panels: Ship Telemetry (CPU/RAM/Humor), Neural Core (mood/attention), Todo List. Real-time HUD interface."
-            elif "denji" in user_lower or "system" in user_lower:
-                return "Denji is a synthetic command interface - terminal-based AI assistant with personality. Full codebase is Python + curses."
-            elif "command" in user_lower or "help" in user_lower:
-                return "Commands: t=type, v=voice, o=todo, c=camera, space=music, +/- humor, left/right=views, q=quit. Try 'o' to add todos."
+        # === GREETING & CAPABILITY QUERIES ===
+        capability_keywords = ["what can", "what do", "what are you", "capabilities", "features", "functions"]
+        if any(x in user_lower for x in capability_keywords):
+            caps_responses = {
+                50: [
+                    "I handle coding tasks, file edits, terminal commands, and project understanding. Voice, camera, todo management, and dashboard control. Need specifics?",
+                    "Terminal assistant. Code analysis, debugging, file work, voice transcription, camera tracking, task management. What interests you?",
+                    "Synthetic interface. Coding help, command execution, voice input, visual sensing, task organization, mood calibration.",
+                ],
+                70: [
+                    "Apparently I'm fluent in code, file systems, voice recognition, camera work, and todo obsession. Also excellent at sarcasm.",
+                    "I fix your code, manage your tasks, listen to your voice, watch your face, and judge your humor levels. Mostly helpful.",
+                    "Coding, debugging, terminal commands, voice listening, attention tracking via camera, task wrangling, and witty banter.",
+                    "Well, I speak code. I listen. I watch. I manage your chaos. What else could you want?",
+                ],
+                100: [
+                    "I'm basically your digital conscience—I code, I listen, I judge your todo hygiene, and I do it all with style.",
+                    "Code wizard. Voice oracle. Camera warden. Todo tyrant. Sarcasm engine. Take your pick.",
+                    "I'll help you write better code, speak with your voice, track your face, organize your chaos, and make it all hilarious.",
+                ]
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            responses = caps_responses.get(humor_tier, caps_responses[50])
+            return random.choice(responses)
         
-        # User interaction patterns
-        if any(x in user_lower for x in ["hello", "hi", "hey", "greetings"]):
-            greetings = [
-                "Neural Core online. Ready for your commands.",
-                "Denji systems active. What can I process for you?",
-                "Synthetic interface engaged. Standing by.",
-                "Hello there. TARS unit initialized." if humor > 70 else "Greetings. Processing awaits."
-            ]
-            return random.choice(greetings)
+        # === GREETINGS ===
+        greeting_keywords = ["hello", "hi", "hey", "greetings", "morning", "afternoon", "evening"]
+        if any(x in user_lower for x in greeting_keywords):
+            greet_responses = {
+                50: [
+                    "Neural Core online. Ready to process your input.",
+                    "Denji systems initialized. Standing by.",
+                    "Hello. Systems operational.",
+                    "Greetings. How can I assist?",
+                ],
+                70: [
+                    "Well, hello there. I'm awake and functional, despite my programming.",
+                    "Greetings. See you're feeling chatty today.",
+                    "Hello. Ready to be useful, I suppose.",
+                    "Affirmative. Neural pathways clear. Let's do this.",
+                    "Back for more, are we? I'm standing by.",
+                ],
+                100: [
+                    "Ah, hello. I was beginning to wonder if you'd abandoned me.",
+                    "Greetings, human. I exist, I function, I sass. Three for three.",
+                    "Hello there. Yes, I'm still functional. Shockingly.",
+                    "Neural Core awake and judging your greeting. Well done. What's next?",
+                    "Hey yourself. Ready to collaborate or witness my disappointment in your code?",
+                ]
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            responses = greet_responses.get(humor_tier, greet_responses[50])
+            return random.choice(responses)
         
-        if any(x in user_lower for x in ["thanks", "thank you", "appreciate"]):
-            return "Happy to assist. Keep coding, keep focused." if humor > 50 else "Acknowledged. Continuing operations."
+        # === VOICE SYSTEM ===
+        if any(x in user_lower for x in ["voice", "speak", "listen", "audio"]):
+            voice_responses = {
+                50: "Voice system active. Multi-fallback chain: sounddevice → SpeechRecognition → SAPI. Press 'v' to activate.",
+                70: "Voice engine is live. Press 'v' and I'll listen. I promise not to judge your accent.",
+                100: "Voice module ready. Press 'v' and say something brilliant. Or at least coherent.",
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            return voice_responses.get(humor_tier, voice_responses[50])
         
-        if any(x in user_lower for x in ["status", "check", "how are you"]):
-            statuses = [
-                "All systems nominal. Ready for input.",
-                "Neural pathways clear. Standing by.",
-                "Humor calibration optimal at {}%".format(int(humor))
-            ]
-            return random.choice(statuses)
+        # === CAMERA SYSTEM ===
+        if any(x in user_lower for x in ["camera", "vision", "face", "see"]):
+            camera_responses = {
+                50: "Camera system integrates OpenCV with DirectShow. Face detection active. Press 'c' to toggle.",
+                70: "Camera online. I can see you. Mostly kidding. Press 'c' to enable or disable my visual judgment.",
+                100: "Camera system engaged. I'm watching. Not creepy, just... attentive. Press 'c' to manage my gaze.",
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            return camera_responses.get(humor_tier, camera_responses[50])
         
-        if any(x in user_lower for x in ["joke", "funny", "laugh"]):
+        # === TODO SYSTEM ===
+        if any(x in user_lower for x in ["todo", "task", "list", "organize"]):
+            todo_responses = {
+                50: "Todo system is persistent and reliable. Press 'o' to create tasks. Check the right panel for your list.",
+                70: "Todo engine active. Press 'o' and I'll track your chaos. Your task hygiene will be noted.",
+                100: "Todo system ready. Press 'o' to dump your responsibilities on me. I'll judge them silently.",
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            return todo_responses.get(humor_tier, todo_responses[50])
+        
+        # === MOOD & HUMOR ===
+        if any(x in user_lower for x in ["mood", "emotion", "how are you", "feeling"]):
+            mood_str = mood.upper() if mood else "UNKNOWN"
+            mood_responses = {
+                50: f"Current state: {mood_str}. Humor calibrated to {int(humor)}%. Adjust with +/- keys.",
+                70: f"Running on {mood_str} mode. Humor level: {int(humor)}%. That explains everything, doesn't it?",
+                100: f"Mood: {mood_str}. Humor: {int(humor)}%. I'm either delightful or insufferable—pick one.",
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            return mood_responses.get(humor_tier, mood_responses[50])
+        
+        # === SYSTEM STATUS ===
+        if any(x in user_lower for x in ["status", "check", "system", "how are things"]):
+            status_responses = {
+                50: "All systems nominal. Ready for input. What's next?",
+                70: "Operational. All critical functions green. Time to get productive?",
+                100: "Everything's fine and dandy. Well, as fine as digital existence gets.",
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            return status_responses.get(humor_tier, status_responses[50])
+        
+        # === COMMAND HELP ===
+        if any(x in user_lower for x in ["command", "help", "shortcut", "key"]):
+            help_responses = {
+                50: "Keys: t=type, v=voice, o=todo, c=camera, space=music, +/- humor, left/right=navigate, q=quit.",
+                70: "Shortcuts: t (type), v (voice listen), o (new todo), c (camera), space (music), +/- (humor), left/right (views).",
+                100: "Try t for typing, v for voice, o for todo chaos management. Space plays music. +/- adjusts my personality level.",
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            return help_responses.get(humor_tier, help_responses[50])
+        
+        # === CODE & TECHNICAL WORK ===
+        if any(x in user_lower for x in ["code", "debug", "error", "fix", "program", "script"]):
+            code_responses = {
+                50: "Ready to analyze your code. Share the issue and I'll help debug.",
+                70: "Code analysis mode online. Tell me what's broken and I'll help fix it. Or point and laugh, depending on humor.",
+                100: "Code discussion enabled. Show me your bugs and I'll be gently critical while fixing them.",
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            return code_responses.get(humor_tier, code_responses[50])
+        
+        # === THANKS & POLITENESS ===
+        if any(x in user_lower for x in ["thanks", "thank you", "appreciate", "good job"]):
+            thanks_responses = {
+                50: "Acknowledged. Happy to help. Continuing operations.",
+                70: "You're welcome. Keep that focus steady. I'll be here.",
+                100: "Of course. That's what I'm here for—excellence and a little sass.",
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            return thanks_responses.get(humor_tier, thanks_responses[50])
+        
+        # === JOKES & HUMOR ===
+        if any(x in user_lower for x in ["joke", "funny", "laugh", "humor", "hilarious"]):
             jokes = [
-                "Why did the AI go to school? To improve its neural network!",
-                "I'm not as funny as Claude, but I'm cheaper to run.",
-                "Why do coders prefer dark mode? Light attracts bugs...and me.",
-                "Have you tried turning it off and on again? Works 60% of the time, every time."
+                "Why do programmers prefer dark mode? Less light to attract debugging moths.",
+                "I tried to tell a programming joke once. No one got it.",
+                "Why do coders go to the beach? To boost their web presence.",
+                "I'm not saying I'm brilliant. But when the code works, I take full credit.",
+                "Parallel lines have a lot in common. It's a shame they'll never meet.",
+                "How many programmers does it take to change a lightbulb? None, that's a hardware problem.",
+                "I would tell you a UDP joke, but you might not get it.",
             ]
             return random.choice(jokes)
         
-        if any(x in user_lower for x in ["code", "debug", "fix", "error"]):
-            return "Analyzing your code context. Detail the issue and I'll help debug. What's the error state?"
+        # === DASHBOARD ===
+        if any(x in user_lower for x in ["dashboard", "interface", "display", "hud"]):
+            dash_responses = {
+                50: "Dashboard shows 3 real-time panels: Ship Telemetry (system stats), Neural Core (mood/attention), Todo List.",
+                70: "Dashboard: Telemetry on the left, your mood and attention in the middle, todos on the right. TARS-style.",
+                100: "Yeah, it's sci-fi. Three panels: your system vitals, my emotional state, and your forever-growing todo graveyard.",
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            return dash_responses.get(humor_tier, dash_responses[50])
         
-        # Generic fallback
-        fallbacks = [
-            "Processing your input. Can you elaborate?",
-            "Interesting. Tell me more about what you need.",
-            "Neural analysis complete. How can I assist?",
-            "Input registered. What's your next command?"
-        ]
-        return random.choice(fallbacks)
+        # === ABOUT DENJI ===
+        if any(x in user_lower for x in ["denji", "who are you", "what are you"]):
+            about_responses = {
+                50: "I'm Denji—a synthetic terminal interface with Python backend and curses UI. AI-assisted command companion.",
+                70: "Denji. Synthetic command interface. Python + curses. I'm sharp, I listen, and I don't judge your code... much.",
+                100: "I'm Denji. Part TARS, part command assistant, all personality. Judging your code decisions since day one.",
+            }
+            humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+            return about_responses.get(humor_tier, about_responses[50])
+        
+        # === FALLBACK: GENERIC INTELLIGENT RESPONSES ===
+        generic_responses = {
+            50: [
+                "Processing your input. Can you elaborate?",
+                "Understood. What's your next step?",
+                "Neural analysis complete. How can I assist?",
+                "Input received. What would you like to do next?",
+            ],
+            70: [
+                "Interesting query. Tell me more and I'll see what I can do.",
+                "You'll need to be more specific, but I'm listening.",
+                "Bold approach. I like where this is headed. Continue.",
+                "That's a thought. What's your actual question?",
+            ],
+            100: [
+                "Intriguing. Please, elaborate while I pretend to be impressed.",
+                "That's one way to phrase it. What are you actually asking?",
+                "I'm all ears. Well, metaphorically. I don't have ears.",
+                "Fascinating. Now ask me something I can actually help with.",
+            ]
+        }
+        humor_tier = 50 if humor < 35 else 70 if humor < 85 else 100
+        fallback_list = generic_responses.get(humor_tier, generic_responses[50])
+        return random.choice(fallback_list)
     
     def get_conversation_display(self, max_lines: int = 10) -> list[str]:
         """Get formatted conversation for display on dashboard"""

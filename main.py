@@ -3418,6 +3418,30 @@ def denji_submit_command(cmd):
         personality_response = DS.personality.generate_acknowledgment(c)
 
     command_handled = False
+
+    if c in ("test", "ai test", "test ai", "tars"):
+        # Quick TARS personality test
+        DS.user_text = raw
+        if HAS_AI_ENGINE and DS.ai_engine:
+            DS.ai_last_input = "Quick TARS personality check"
+            DS.mood = "processing"
+            try:
+                response = DS.ai_engine.get_response("What can you do?", DS.mood, DS.humor_level)
+                DS.ai_last_output = response
+                backend = (DS.ai_engine.last_backend or "TARS").upper()
+                DS.response_text = f"[{backend}] {response}"
+                DS.mood = "speaking"
+                DS.last_action = "Ran TARS personality test"
+                denji_speak(DS.response_text)
+            except Exception as err:
+                DS.response_text = f"Neural error: {str(err)[:40]}"
+                DS.mood = "idle"
+                denji_speak(DS.response_text)
+        else:
+            DS.response_text = _tars_reply("TARS system ready", personality_response)
+            DS.last_action = "TARS test"
+            denji_speak(DS.response_text)
+        return
     
     if "play" in c and "music" in c:
         if not AUDIO.playing:
@@ -3657,7 +3681,7 @@ def v_tars_dashboard(win, W, H):
             centre(win, 14, _clip(f"1. {first_todo}", W - 6), cp(P_DIM))
         voice_label = "VOICE LISTENING" if DS.listening else "VOICE READY" if DS.voice_enabled else "VOICE OFFLINE"
         centre(win, H - 3, voice_label, cp(P_CYAN if DS.voice_enabled else P_DIM, bold=True))
-        put(win, H - 1, 0, " type any key/t  v voice  m mute  o todo  + - humor  c camera  left/right views  esc cancel  q quit ", cp(P_DIM))
+        put(win, H - 1, 0, " type any key/t  test TARS  v voice  m mute  o todo  + - humor  c camera  left/right views  esc cancel  q quit ", cp(P_DIM))
         return
 
     # Cinematic sci-fi header band
