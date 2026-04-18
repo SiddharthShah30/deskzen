@@ -3308,7 +3308,7 @@ def _denji_listen_worker():
 def denji_listen_once():
     if not (HAS_SR or HAS_VOICE_ENGINE):
         DS.input_mode = True
-        DS.input_buf = "Denji play music"
+        DS.input_buf = ""
         DS.mood = "listening"
         DS.mood_until = time.time() + 0.5
         DS.stage_queue = [("idle", 0.0)]
@@ -3434,9 +3434,10 @@ def denji_submit_command(cmd):
                 try:
                     response = DS.ai_engine.get_response(raw, DS.mood, DS.humor_level)
                     DS.ai_last_output = response
-                    DS.response_text = response
+                    backend = (DS.ai_engine.last_backend or "RULE").upper()
+                    DS.response_text = f"[{backend}] {response}"
                     DS.mood = "speaking"
-                    denji_speak(response)
+                    denji_speak(DS.response_text)
                 except Exception as err:
                     DS.response_text = f"Neural error: {str(err)[:40]}"
                     DS.mood = "idle"
@@ -3629,8 +3630,8 @@ def v_tars_dashboard(win, W, H):
     # Main geometry
     top = 3
     body_h = H - 7
-    left_w = max(30, W // 4)
-    right_w = max(34, W // 3)
+    left_w = max(26, W // 5)
+    right_w = max(30, W // 3)
     center_w = max(26, W - left_w - right_w - 2)
     left_x = 0
     center_x = left_w + 1
@@ -3677,14 +3678,17 @@ def v_tars_dashboard(win, W, H):
     centre(win, top + 7, "─" * max(5, center_w - 6), cp(P_BOX))
     
     if HAS_AI_ENGINE and DS.ai_engine:
-        conv_lines = DS.ai_engine.get_conversation_display(max_lines=min(5, max(3, body_h - top - 13)))
+        conv_lines = DS.ai_engine.get_conversation_display(max_lines=min(8, max(4, body_h - top - 12)))
         for i, line in enumerate(conv_lines):
             y = top + 8 + i
-            if y < top + body_h - 4:
+            if y < top + body_h - 5:
                 # Alternate colors for readability
                 is_user = line.startswith("YOU >")
                 color = P_HI if is_user else P_GREEN
                 put(win, y, center_x + 2, _clip(line, center_w - 4), cp(color))
+
+    # Keep latest output always visible even while typing/todo input.
+    put(win, top + body_h - 5, center_x + 2, _clip(f"OUTPUT > {DS.response_text}", center_w - 4), cp(P_GREEN))
     
     # Current input/composer line
     if DS.input_mode:
@@ -5767,7 +5771,7 @@ def handle_key(k):
         if v == 0 and k in (ord('t'), ord('T'), ord('/')):
             DS.input_mode = True
             if not DS.input_buf:
-                DS.input_buf = "Denji play music"
+                DS.input_buf = ""
             return
         if v == 0 and k in (ord('o'), ord('O')):
             ST.todo_add = True

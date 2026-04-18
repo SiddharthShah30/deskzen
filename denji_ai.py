@@ -11,6 +11,7 @@ import json
 import threading
 import time
 import subprocess
+import random
 from typing import Any, Optional
 
 try:
@@ -142,10 +143,13 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
         
         return codebase_context
     
-    def add_message(self, role: str, content: str):
+    def add_message(self, role: str, content: str, backend: Optional[str] = None):
         """Add a message to conversation history"""
         with self._lock:
-            self.conversation_history.append({"role": role, "content": content})
+            msg = {"role": role, "content": content}
+            if backend:
+                msg["backend"] = backend
+            self.conversation_history.append(msg)
             # Keep history manageable
             if len(self.conversation_history) > self.max_history:
                 self.conversation_history = self.conversation_history[-self.max_history:]
@@ -166,12 +170,18 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
         response = self._generate_response_local(user_input, personality_mood, humor_level)
         
         if not response:
-            # Fallback: Simple rule-based responses
-            self.last_backend = "RULE"
-            response = self._fallback_response(user_input, personality_mood, humor_level)
+            # If OpenCode is installed but temporarily failed, keep backend explicit
+            # and avoid repeating canned greetings that feel hardcoded.
+            if HAS_OPENCODE:
+                self.last_backend = "OPENCODE"
+                response = "OpenCode is online but did not return in time. Ask again in 1-2 seconds."
+            else:
+                # Fallback: Simple rule-based responses
+                self.last_backend = "RULE"
+                response = self._fallback_response(user_input, personality_mood, humor_level)
         
         self.thinking = False
-        self.add_message("assistant", response)
+        self.add_message("assistant", response, backend=self.last_backend)
         self.last_response = response
         self.response_time = time.time()
         
@@ -221,18 +231,25 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
                 f"User: {user_input}"
             )
 
-            cmd = _opencode_cmd_prefix() + ["run", full_prompt]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                timeout=20,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            attempts = [
+                _opencode_cmd_prefix() + ["--pure", "run", full_prompt],
+                _opencode_cmd_prefix() + ["run", full_prompt],
+            ]
 
-            output = (result.stdout or "").strip()
-            if result.returncode == 0 and output:
+            for cmd in attempts:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=25,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+
+                output = ((result.stdout or "").strip() or (result.stderr or "").strip())
+                if not (result.returncode == 0 and output):
+                    continue
+
                 # Normalize OpenCode run output (strip heading lines like "> build · ...").
                 lines = [ln.rstrip() for ln in output.splitlines()]
                 cleaned: list[str] = []
@@ -253,6 +270,13 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
                 if response:
                     self.last_backend = "OPENCODE"
                     return response[:480]
+
+                # If OpenCode is available but failed, surface a concise diagnostic.
+                if output:
+                    first = output.splitlines()[0].strip()
+                    if first:
+                        self.last_backend = "OPENCODE"
+                        return f"OpenCode is available but could not answer yet: {first[:220]}"
             
             return None
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError, UnicodeError):
@@ -289,7 +313,7 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
                 "Synthetic interface engaged. Standing by.",
                 "Hello there. TARS unit initialized." if humor > 70 else "Greetings. Processing awaits."
             ]
-            return greetings[hash(user_input) % len(greetings)]
+            return random.choice(greetings)
         
         if any(x in user_lower for x in ["thanks", "thank you", "appreciate"]):
             return "Happy to assist. Keep coding, keep focused." if humor > 50 else "Acknowledged. Continuing operations."
@@ -300,7 +324,7 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
                 "Neural pathways clear. Standing by.",
                 "Humor calibration optimal at {}%".format(int(humor))
             ]
-            return statuses[hash(user_input) % len(statuses)]
+            return random.choice(statuses)
         
         if any(x in user_lower for x in ["joke", "funny", "laugh"]):
             jokes = [
@@ -309,7 +333,7 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
                 "Why do coders prefer dark mode? Light attracts bugs...and me.",
                 "Have you tried turning it off and on again? Works 60% of the time, every time."
             ]
-            return jokes[hash(user_input) % len(jokes)]
+            return random.choice(jokes)
         
         if any(x in user_lower for x in ["code", "debug", "fix", "error"]):
             return "Analyzing your code context. Detail the issue and I'll help debug. What's the error state?"
@@ -321,7 +345,7 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
             "Neural analysis complete. How can I assist?",
             "Input registered. What's your next command?"
         ]
-        return fallbacks[hash(user_input) % len(fallbacks)]
+        return random.choice(fallbacks)
     
     def get_conversation_display(self, max_lines: int = 10) -> list[str]:
         """Get formatted conversation for display on dashboard"""
@@ -332,7 +356,11 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
             for msg in display_history:
                 role = msg["role"]
                 content = msg["content"]
-                prefix = "YOU > " if role == "user" else "DENJI > "
+                if role == "user":
+                    prefix = "YOU > "
+                else:
+                    backend = (msg.get("backend") or "RULE").upper()
+                    prefix = f"DENJI[{backend}] > "
                 
                 # Truncate long lines
                 if len(content) > 50:
