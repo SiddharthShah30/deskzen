@@ -73,6 +73,23 @@ class DenjiAI:
         self.last_response = ""
         self.response_time = 0.0
         self._opencode_help = _read_opencode_help()
+        self.last_backend = "RULE"
+
+    def _ollama_available(self) -> bool:
+        """Quick health probe for local Ollama service."""
+        if not HAS_REQUESTS:
+            return False
+        try:
+            response = requests.get("http://localhost:11434/api/tags", timeout=1.2)
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def get_backend_status(self) -> str:
+        """Return current backend status for dashboard display."""
+        ollama = "UP" if self._ollama_available() else "DOWN"
+        opencode = "ON" if HAS_OPENCODE else "OFF"
+        return f"AI {self.last_backend} | OLLAMA {ollama} | OPENCODE {opencode}"
         
     def _build_system_prompt(self) -> str:
         """Build the system prompt with Denji codebase knowledge"""
@@ -142,6 +159,7 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
         
         if not response:
             # Fallback: Simple rule-based responses
+            self.last_backend = "RULE"
             response = self._fallback_response(user_input, personality_mood, humor_level)
         
         self.thinking = False
@@ -171,6 +189,7 @@ Be helpful, knowledgeable, and aligned with Denji's synthetic personality."""
                     result = response.json()
                     resp_text = result.get("response", "").strip()
                     if resp_text:
+                        self.last_backend = "OLLAMA"
                         return resp_text
             except Exception:
                 pass
@@ -236,6 +255,7 @@ Respond as Denji's Neural Core in a single, concise line. Keep it professional y
                         response = response.split("```", 1)[-1].strip()
                     if response.endswith("```"):
                         response = response.rsplit("```", 1)[0].strip()
+                    self.last_backend = "OPENCODE"
                     return response[:240]
             
             return None

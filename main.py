@@ -3593,6 +3593,8 @@ def v_tars_dashboard(win, W, H):
         box(win, 1, 0, H - 2, W - 1, "D E N J I   C O R E")
         centre(win, 3, denji_face(DS.mood), cp(P_CYAN, bold=True))
         centre(win, 5, f"STATE {DS.mood.upper()}  |  BOOT {DS.boot_status}", cp(P_MID, bold=True))
+        if HAS_AI_ENGINE and DS.ai_engine:
+            centre(win, 6, _clip(DS.ai_engine.get_backend_status(), W - 6), cp(P_BLUE))
         centre(win, 7, _clip(f"INPUT  {DS.user_text}", W - 6), cp(P_HI))
         centre(win, 8, _clip(f"OUTPUT {DS.response_text}", W - 6), cp(P_GREEN))
         centre(win, 10, f"HUMOR {int(DS.humor_level):3d}%", cp(P_PINK, bold=True))
@@ -3661,6 +3663,8 @@ def v_tars_dashboard(win, W, H):
 
     pulse = "|" * (1 + int((math.sin(time.time() * 4.0) + 1.0) * 6.0))
     centre(win, top + 5, f"[{pulse:<13}]", cp(P_BLUE, bold=True))
+    if HAS_AI_ENGINE and DS.ai_engine:
+        put(win, top + 6, center_x + 2, _clip(DS.ai_engine.get_backend_status(), center_w - 4), cp(P_BLUE))
 
     # AI conversation display
     centre(win, top + 7, "─" * max(5, center_w - 6), cp(P_BOX))
