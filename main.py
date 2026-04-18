@@ -3595,8 +3595,15 @@ def v_tars_dashboard(win, W, H):
         centre(win, 5, f"STATE {DS.mood.upper()}  |  BOOT {DS.boot_status}", cp(P_MID, bold=True))
         if HAS_AI_ENGINE and DS.ai_engine:
             centre(win, 6, _clip(DS.ai_engine.get_backend_status(), W - 6), cp(P_BLUE))
-        centre(win, 7, _clip(f"INPUT  {DS.user_text}", W - 6), cp(P_HI))
-        centre(win, 8, _clip(f"OUTPUT {DS.response_text}", W - 6), cp(P_GREEN))
+        if DS.input_mode:
+            centre(win, 7, _clip(f"COMMAND > {DS.input_buf}_", W - 6), cp(P_CYAN, bold=True))
+            centre(win, 8, "ENTER submit  ESC cancel", cp(P_DIM))
+        elif ST.todo_add:
+            centre(win, 7, _clip(f"NEW TODO > {ST.todo_buf}_", W - 6), cp(P_AMBER, bold=True))
+            centre(win, 8, "ENTER add  ESC cancel", cp(P_DIM))
+        else:
+            centre(win, 7, _clip(f"INPUT  {DS.user_text}", W - 6), cp(P_HI))
+            centre(win, 8, _clip(f"OUTPUT {DS.response_text}", W - 6), cp(P_GREEN))
         centre(win, 10, f"HUMOR {int(DS.humor_level):3d}%", cp(P_PINK, bold=True))
         hbar(win, 11, max(2, (W - 30) // 2), min(26, W - 4), DS.humor_level, P_PINK)
         todo_count = len(ST.todos)
@@ -3607,7 +3614,7 @@ def v_tars_dashboard(win, W, H):
             centre(win, 14, _clip(f"1. {first_todo}", W - 6), cp(P_DIM))
         voice_label = "VOICE LISTENING" if DS.listening else "VOICE READY" if DS.voice_enabled else "VOICE OFFLINE"
         centre(win, H - 3, voice_label, cp(P_CYAN if DS.voice_enabled else P_DIM, bold=True))
-        put(win, H - 1, 0, " t type  v voice  o todo  + - humor  c camera  space play  left/right views  q quit ", cp(P_DIM))
+        put(win, H - 1, 0, " type any key/t  v voice  o todo  + - humor  c camera  left/right views  esc cancel  q quit ", cp(P_DIM))
         return
 
     # Cinematic sci-fi header band
@@ -3679,19 +3686,29 @@ def v_tars_dashboard(win, W, H):
                 color = P_HI if is_user else P_GREEN
                 put(win, y, center_x + 2, _clip(line, center_w - 4), cp(color))
     
-    # Current input line
-    input_display = f"INPUT > {DS.user_text[:max(0,center_w-10)]}"
-    put(win, top + body_h - 3, center_x + 2, _clip(input_display, center_w - 4), cp(P_CYAN, bold=True))
-    
-    if DS.mood == "speaking":
-        spec = ST._spec_smooth[:max(8, center_w - 6)]
-        bars = ""
-        for v in spec:
-            lvl = max(0, min(7, int(v * 8)))
-            bars += "._-:=+*#"[lvl]
-        put(win, top + body_h - 2, center_x + 2, _clip(bars, center_w - 4), cp(P_PINK, bold=True))
+    # Current input/composer line
+    if DS.input_mode:
+        composer = f"COMMAND > {DS.input_buf}_"
+        hint = "ENTER submit  ESC cancel"
+        put(win, top + body_h - 3, center_x + 2, _clip(composer, center_w - 4), cp(P_CYAN, bold=True))
+        put(win, top + body_h - 2, center_x + 2, _clip(hint, center_w - 4), cp(P_DIM))
+    elif ST.todo_add:
+        composer = f"NEW TODO > {ST.todo_buf}_"
+        hint = "ENTER add  ESC cancel"
+        put(win, top + body_h - 3, center_x + 2, _clip(composer, center_w - 4), cp(P_AMBER, bold=True))
+        put(win, top + body_h - 2, center_x + 2, _clip(hint, center_w - 4), cp(P_DIM))
     else:
-        put(win, top + body_h - 2, center_x + 2, _clip("PROCESSING // READY FOR INPUT", center_w - 4), cp(P_DIM))
+        input_display = f"INPUT > {DS.user_text[:max(0,center_w-10)]}"
+        put(win, top + body_h - 3, center_x + 2, _clip(input_display, center_w - 4), cp(P_CYAN, bold=True))
+        if DS.mood == "speaking":
+            spec = ST._spec_smooth[:max(8, center_w - 6)]
+            bars = ""
+            for v in spec:
+                lvl = max(0, min(7, int(v * 8)))
+                bars += "._-:=+*#"[lvl]
+            put(win, top + body_h - 2, center_x + 2, _clip(bars, center_w - 4), cp(P_PINK, bold=True))
+        else:
+            put(win, top + body_h - 2, center_x + 2, _clip("PROCESSING // READY FOR INPUT", center_w - 4), cp(P_DIM))
 
     # Right: mission/news/track stack
     items = get_news_items()
@@ -3725,7 +3742,7 @@ def v_tars_dashboard(win, W, H):
 
     # Footer command rail
     put(win, H - 3, 0, "=" * (W - 1), cp(P_BOX))
-    rail = " t type | v voice | o todo | + - humor | c camera | space play | z/x track | left/right view | q quit "
+    rail = " type any key/t | v voice | o todo | + - humor | c camera | z/x track | left/right view | esc cancel | q quit "
     put(win, H - 2, max(0, (W - len(rail)) // 2), rail, cp(P_DIM))
     put(win, H - 1, max(0, (W - 40) // 2), "DENJI SYNTHETIC INTERFACE // LIVE", cp(P_CYAN, bold=True))
 
@@ -5724,6 +5741,18 @@ def handle_key(k):
 
     # Global shortcuts (only when NOT in input mode)
     if not input_mode_active:
+        # Home view direct typing: start command mode on printable key without requiring 't'.
+        reserved_home_keys = {
+            ord('q'), ord('Q'), ord('t'), ord('T'), ord('/'), ord('v'), ord('V'),
+            ord('o'), ord('O'), ord('c'), ord('C'), ord('+'), ord('='), ord('-'),
+            ord('_'), ord('z'), ord('Z'), ord('x'), ord('X'), ord(' '), ord('h'),
+            ord('H'), ord('l'), ord('L'), ord('1'), ord('2'), ord('3'), ord('4'),
+            ord('5'), ord('6')
+        }
+        if v == 0 and 32 <= k <= 126 and k not in reserved_home_keys:
+            DS.input_mode = True
+            DS.input_buf = chr(k)
+            return
         if k == 27:
             # Page-wise back behavior: only return from shortcut-only pages
             # to the page they were opened from. Otherwise ESC is local/no-op.
