@@ -249,19 +249,35 @@ DENJI SYSTEM KNOWLEDGE:
 
 Be helpful, knowledgeable, and perfectly aligned with this personality."""
             
-            completion = self.groq_client.chat.completions.create(
-                model="mixtral-8x7b-32768",  # Fast, intelligent Groq model
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_input}
-                ],
-                temperature=0.7,
-                max_tokens=256,
-                timeout=8.0
-            )
+            # Try multiple model options in order of preference
+            models_to_try = [
+                "gpt-4o",  # OpenAI compatible, newer
+                "mixtral-8x7b-32768",  
+                "llama2-70b-4096",
+                "claude-3.5-sonnet-20241022",  # Claude fallback
+            ]
             
-            response = completion.choices[0].message.content.strip()
-            return response if response else None
+            for model in models_to_try:
+                try:
+                    completion = self.groq_client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_input}
+                        ],
+                        temperature=0.7,
+                        max_tokens=256,
+                        timeout=8.0
+                    )
+                    response = completion.choices[0].message.content.strip()
+                    if response:
+                        return response
+                except Exception as model_err:
+                    # Try next model
+                    continue
+            
+            # No models available
+            return None
             
         except Exception as err:
             print(f"[Denji] Groq generation failed: {err}")
